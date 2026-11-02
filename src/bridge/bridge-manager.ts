@@ -1,7 +1,12 @@
 import type { Logger } from "../utils/logger.js";
 import type { BridgeRequestEnvelope, BridgeResponseEnvelope } from "../types/bridge.types.js";
 import { FileBridge, type SendOptions } from "./file-bridge.js";
-import { createRequest, type CreateRequestOptions } from "./message-protocol.js";
+import {
+  createRequest,
+  validateCommandPayload,
+  type BridgeCommand,
+  type CreateRequestOptions
+} from "./message-protocol.js";
 
 export class BridgeManager {
   private tail: Promise<unknown> = Promise.resolve();
@@ -12,13 +17,13 @@ export class BridgeManager {
   ) {}
 
   async execute(
-    command: string,
+    command: BridgeCommand,
     payload: Record<string, unknown> = {},
     options: CreateRequestOptions & SendOptions = {}
   ): Promise<{ request: BridgeRequestEnvelope; response: BridgeResponseEnvelope }> {
     return this.enqueueOperation(async () => {
       const request = createRequest(command, {
-        payload,
+        payload: validateCommandPayload(command, payload),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         ...(options.id !== undefined ? { id: options.id } : {})
       });
@@ -35,13 +40,13 @@ export class BridgeManager {
   }
 
   async enqueueOnly(
-    command: string,
+    command: BridgeCommand,
     payload: Record<string, unknown> = {},
     options: CreateRequestOptions = {}
   ): Promise<BridgeRequestEnvelope> {
     return this.enqueueOperation(async () => {
       const request = createRequest(command, {
-        payload,
+        payload: validateCommandPayload(command, payload),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         ...(options.id !== undefined ? { id: options.id } : {})
       });

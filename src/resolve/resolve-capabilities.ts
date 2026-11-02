@@ -34,7 +34,16 @@ const CAPABILITIES: Capability[] = [
     implemented: true,
     milestone: "1",
     evidence: "Live request eb8dbb32-2abf-4881-ba3a-e0ea608900e5 was processed by the Bridge menu and returned ok: true, resolveConnected: true, version 21.1.0.17.",
-    notes: "Node writes next.request.json and next.request.lua. Lua reads the request with loadfile and publishes the response through Fusion prefs because io is unavailable. Manual menu trigger is still required."
+    notes: "Node writes next.request.json and next.request.lua. Lua reads the request with loadfile and publishes the response through Fusion prefs because io is unavailable. Processed ids are retained for idempotent replay, and early transport failures are published through Fusion prefs. Manual menu trigger is still required."
+  },
+  {
+    id: "resolve.inspection-readonly",
+    name: "Read-only project, media pool, timeline and render inspection",
+    status: "verified",
+    implemented: true,
+    milestone: "2",
+    evidence: "Live Resolve Free 21.1.0.17: project.inspect b3efe48d-d048-4fd3-b947-25a9019eefa7, media.inspect e9b7ff20-e505-4fad-b9d7-914b05b0edd4, timeline.inspect b7859be9-c74b-4d19-a306-1770ef467c72 and render.inspect 44ce72ee-6287-41d5-b286-87deef8bc9ca all returned ok: true.",
+    notes: "Timeline inspection returned TIMELINE_UNAVAILABLE when no timeline was open, then succeeded after a timeline was created. Project.GetRenderSettings is absent from this Free internal context; render settings are optional and omission is not treated as an error."
   },
   {
     id: "bridge.background-polling",

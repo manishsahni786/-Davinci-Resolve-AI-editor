@@ -40,6 +40,16 @@ describe("FileBridge", () => {
     await expect(bridge.enqueue(createRequest("bridge.echo"))).rejects.toBeInstanceOf(BridgeBusyError);
   });
 
+  it("rejects reusing a pending id for a different command", async () => {
+    const { bridge } = await makeBridge();
+    const request = createRequest("diagnostics.ping", { id: "fixed-id" });
+    await bridge.enqueue(request);
+
+    await expect(
+      bridge.enqueue(createRequest("bridge.echo", { id: "fixed-id" }))
+    ).rejects.toBeInstanceOf(BridgeProtocolError);
+  });
+
   it("reads a response written by a simulated Lua processor", async () => {
     const { bridge, settings } = await makeBridge({ commandTimeoutMs: 1000 });
     const request = createRequest("diagnostics.ping");

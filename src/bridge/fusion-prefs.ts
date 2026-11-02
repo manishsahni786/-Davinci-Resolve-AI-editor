@@ -9,9 +9,20 @@ export const FUSION_PREF_KEYS = {
   responseId: "AIVideoEditorBridgeResponseId",
   responseHex: "AIVideoEditorBridgeResponseHex",
   processedId: "AIVideoEditorBridgeProcessedId",
+  stage: "AIVEBridgeStage",
+  error: "AIVEBridgeError",
+  errorAt: "AIVEBridgeErrorAt",
   diagnosticsHex: "AIVideoEditorBridgeDiagnosticsHex",
   diagnosticsAt: "AIVideoEditorBridgeDiagnosticsAt"
 } as const;
+
+export interface FusionBridgeState {
+  stage: string | null;
+  error: string | null;
+  errorAt: string | null;
+  responseId: string | null;
+  processedIds: string[];
+}
 
 export function unescapeLuaString(value: string): string {
   return value.replace(/\\(x[0-9a-fA-F]{2}|[0-9]{1,3}|.)/g, (_match, escape: string) => {
@@ -39,7 +50,7 @@ export function unescapeLuaString(value: string): string {
 
 export function parseLuaPrefs(text: string): Map<string, string> {
   const values = new Map<string, string>();
-  const pattern = /^\s*([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*"((?:\\[\\\"]|[^"\\])*)"\s*,?\s*$/;
+  const pattern = /^\s*([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*"((?:\\.|[^"\\])*)"\s*,?\s*$/;
   for (const line of text.split(/\r?\n/)) {
     const match = pattern.exec(line);
     if (match && match[1] !== undefined && match[2] !== undefined) {
@@ -139,6 +150,38 @@ export class FusionPrefsChannel {
       await sleep(Math.min(this.pollIntervalMs, remaining), undefined, { signal });
     }
     return null;
+  }
+
+  async readBridgeState(): Promise<FusionBridgeState | null> {
+    const values = await this.readValues();
+    if (!values) {
+      return null;
+    }
+    const responseId = decodeHex(values.get(FUSION_PREF_KEYS.responseId));
+    const processedValue = values.get(FUSION_PREF_KEYS.processedId) ?? "";
+    const processedIds = processedValue
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value !== "");
+    return {
+      stage: values.get(FUSION_PREF_KEYS.stage) ?? null,
+      error: values.get(FUSION_PREF_KEYS.error) ?? null,
+      errorAt: values.get(FUSION_PREF_KEYS.errorAt) ?? null,
+      responseId,
+      processedIds
+    };
+  }
+
+  async readBridgeError(): Promise<{ message: string; at: string | null; stage: string | null } | null> {
+    const state = await this.readBridgeState();
+    if (!state || state.error === null || state.error.trim() === "") {
+      return null;
+    }
+    return {
+      message: state.error,
+      at: state.errorAt,
+      stage: state.stage
+    };
   }
 
   async readDiagnostics(): Promise<unknown | null> {

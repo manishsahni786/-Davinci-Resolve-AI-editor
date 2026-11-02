@@ -50,6 +50,38 @@ export class ResolveClient {
     return response;
   }
 
+  async inspectProject(
+    payload: Record<string, unknown> = {},
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("project.inspect", payload, { timeoutMs });
+    return response;
+  }
+
+  async inspectMedia(
+    payload: Record<string, unknown> = {},
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("media.inspect", payload, { timeoutMs });
+    return response;
+  }
+
+  async inspectTimeline(
+    payload: Record<string, unknown> = {},
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.inspect", payload, { timeoutMs });
+    return response;
+  }
+
+  async inspectRender(
+    payload: Record<string, unknown> = {},
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("render.inspect", payload, { timeoutMs });
+    return response;
+  }
+
   async status(): Promise<ResolveStatus> {
     const [environment, processInfo, portListening] = await Promise.all([
       getEnvironmentSnapshot(this.settings),

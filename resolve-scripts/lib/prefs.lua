@@ -3,16 +3,29 @@
 -- Node polls Fusion.prefs, decodes the hex, and validates the JSON.
 
 local prefs = {}
+local fusionOverride = nil
+
+function prefs.setFusion(value)
+  fusionOverride = value
+end
 
 prefs.KEYS = {
   responseId = "Global.AIVideoEditorBridgeResponseId",
   responseHex = "Global.AIVideoEditorBridgeResponseHex",
   processedId = "Global.AIVideoEditorBridgeProcessedId",
+  stage = "Global.AIVEBridgeStage",
+  error = "Global.AIVEBridgeError",
+  errorAt = "Global.AIVEBridgeErrorAt",
   diagnosticsHex = "Global.AIVideoEditorBridgeDiagnosticsHex",
   diagnosticsAt = "Global.AIVideoEditorBridgeDiagnosticsAt"
 }
 
+local MAX_PROCESSED_IDS = 20
+
 local function fusionObject()
+  if fusionOverride ~= nil then
+    return fusionOverride
+  end
   if type(fusion) == "userdata" or type(fusion) == "table" then
     return fusion
   end
@@ -92,18 +105,50 @@ function prefs.publishResponse(requestId, responseJson, markProcessed)
   if not prefs.available() then
     return nil, "Fusion preferences are unavailable; cannot publish a response."
   end
+  local object = fusionObject()
   local ok, errorMessage = pcall(function()
-    fusion:SetPrefs(prefs.KEYS.responseId, prefs.hex(requestId))
-    fusion:SetPrefs(prefs.KEYS.responseHex, prefs.hex(responseJson))
-    if markProcessed then
-      fusion:SetPrefs(prefs.KEYS.processedId, requestId)
+    local processed = prefs.processedIds()
+    if markProcessed and not prefs.hasProcessed(requestId, processed) then
+      processed[#processed + 1] = requestId
+      while #processed > MAX_PROCESSED_IDS do
+        table.remove(processed, 1)
+      end
     end
-    fusion:SavePrefs()
+    object:SetPrefs(prefs.KEYS.responseId, prefs.hex(requestId))
+    object:SetPrefs(prefs.KEYS.responseHex, prefs.hex(responseJson))
+    object:SetPrefs(prefs.KEYS.processedId, table.concat(processed, ","))
+    object:SetPrefs(prefs.KEYS.stage, "response-published")
+    object:SetPrefs(prefs.KEYS.error, "")
+    object:SavePrefs()
   end)
   if not ok then
     return nil, tostring(errorMessage)
   end
   return true
+end
+
+function prefs.processedIds()
+  local result = {}
+  local value = prefs.get(prefs.KEYS.processedId)
+  if type(value) ~= "string" or value == "" then
+    return result
+  end
+  for item in value:gmatch("[^,]+") do
+    if item ~= "" then
+      result[#result + 1] = item
+    end
+  end
+  return result
+end
+
+function prefs.hasProcessed(requestId, processed)
+  processed = processed or prefs.processedIds()
+  for _, value in ipairs(processed) do
+    if value == requestId then
+      return true
+    end
+  end
+  return false
 end
 
 function prefs.processedId()
@@ -114,14 +159,54 @@ function prefs.processedId()
   return value
 end
 
+function prefs.responseId()
+  return prefs.get(prefs.KEYS.responseId)
+end
+
+function prefs.responseJsonFor(requestId)
+  if prefs.responseId() ~= prefs.hex(requestId) then
+    return nil
+  end
+  return prefs.unhex(prefs.get(prefs.KEYS.responseHex))
+end
+
+function prefs.setStage(stage)
+  local object = fusionObject()
+  local ok, errorMessage = pcall(function()
+    object:SetPrefs(prefs.KEYS.stage, tostring(stage))
+    object:SavePrefs()
+  end)
+  if not ok then
+    return nil, tostring(errorMessage)
+  end
+  return true
+end
+
+function prefs.recordError(message)
+  local object = fusionObject()
+  local ok, errorMessage = pcall(function()
+    object:SetPrefs(prefs.KEYS.error, tostring(message))
+    object:SetPrefs(prefs.KEYS.errorAt, tostring((os and os.time and os.time()) or ""))
+    object:SetPrefs(prefs.KEYS.stage, "error")
+    object:SavePrefs()
+  end)
+  if not ok then
+    return nil, tostring(errorMessage)
+  end
+  return true
+end
+
 function prefs.publishDiagnostics(jsonText)
   if not prefs.available() then
     return nil, "Fusion preferences are unavailable; cannot publish diagnostics."
   end
+  local object = fusionObject()
   local ok, errorMessage = pcall(function()
-    fusion:SetPrefs(prefs.KEYS.diagnosticsHex, prefs.hex(jsonText))
-    fusion:SetPrefs(prefs.KEYS.diagnosticsAt, tostring((os and os.time and os.time()) or ""))
-    fusion:SavePrefs()
+    object:SetPrefs(prefs.KEYS.diagnosticsHex, prefs.hex(jsonText))
+    object:SetPrefs(prefs.KEYS.diagnosticsAt, tostring((os and os.time and os.time()) or ""))
+    object:SetPrefs(prefs.KEYS.stage, "diagnostics-published")
+    object:SetPrefs(prefs.KEYS.error, "")
+    object:SavePrefs()
   end)
   if not ok then
     return nil, tostring(errorMessage)

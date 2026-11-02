@@ -5,7 +5,11 @@ import { getEnvironmentSnapshot } from "./config/environment.js";
 import { FileBridge } from "./bridge/file-bridge.js";
 import { BridgeManager } from "./bridge/bridge-manager.js";
 import { FusionPrefsChannel } from "./bridge/fusion-prefs.js";
-import { createRequest } from "./bridge/message-protocol.js";
+import {
+  createRequest,
+  isKnownBridgeCommand,
+  type BridgeCommand
+} from "./bridge/message-protocol.js";
 import { ResolveClient } from "./resolve/resolve-client.js";
 import { listCapabilities, summarizeCapabilities } from "./resolve/resolve-capabilities.js";
 import { MockResolveAdapter } from "./resolve/mock-resolve-adapter.js";
@@ -15,18 +19,26 @@ import { assertRequestId } from "./utils/validation.js";
 import { writeTextFileAtomic } from "./utils/file-utils.js";
 
 const HELP = `
-AI Video Editor - Milestone 1 (environment diagnostics + Resolve bridge)
+AI Video Editor - Milestone 2 (Resolve inspection commands)
 
 Usage:
   npm run status                 Show environment, bridge and capability status.
   npm run diagnostics            Full environment snapshot and capability matrix.
   npm run capabilities           Print the capability matrix as JSON.
   npm run resolve:test           Queue diagnostics.ping and wait for the manual Lua trigger.
-  npm run resolve:queue          Queue diagnostics.ping without waiting.
+  npm run resolve:queue -- <cmd> Queue a command without waiting (default: diagnostics.ping).
   npm run resolve:read -- <id>   Read a response by request id.
+  npm run resolve:error          Show the last bridge error published through Fusion prefs.
+  npm run resolve:project        Inspect the current project.
+  npm run resolve:media          Inspect the media pool.
+  npm run resolve:timeline       Inspect the current timeline.
+  npm run resolve:render         Inspect render formats, codecs and presets.
   npm run resolve:diagnostics    Read the report published by the Diagnostics menu item.
   npm run resolve:clear          Archive a pending request without processing it.
   npm run resolve:mock           Run a mock Resolve adapter (no Resolve required).
+
+Inspection commands:
+  project.inspect, media.inspect, timeline.inspect, render.inspect
 
 Options:
   --timeout-ms=<number>          Override the bridge wait timeout.
@@ -108,18 +120,42 @@ async function main(): Promise<number> {
     case "test":
       return await runConnectionTest();
     case "queue": {
-      const request = createRequest("diagnostics.ping", {
+      const requestedCommand = args.slice(1).find((arg) => !arg.startsWith("--")) ?? "diagnostics.ping";
+      if (!isKnownBridgeCommand(requestedCommand)) {
+        console.error(`Unknown bridge command: ${requestedCommand}`);
+        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect");
+        return 1;
+      }
+      const request = createRequest(requestedCommand, {
         ...(timeoutOverride !== undefined ? { timeoutMs: timeoutOverride } : {})
       });
       await bridge.enqueue(request);
       console.log(JSON.stringify({
         queued: true,
+        command: request.command,
         requestId: request.id,
         requestPath: bridge.requestFilePath,
         nextStep: "In Resolve: Workspace > Scripts > Utility > AI Video Editor Bridge"
       }, null, 2));
       return 0;
     }
+    case "resolve-error": {
+      const bridgeError = await prefsChannel.readBridgeError();
+      if (!bridgeError) {
+        console.log(JSON.stringify({ found: false }, null, 2));
+        return 0;
+      }
+      console.log(JSON.stringify({ found: true, ...bridgeError }, null, 2));
+      return 0;
+    }
+    case "project":
+      return await runInspectionCommand("project.inspect");
+    case "media":
+      return await runInspectionCommand("media.inspect");
+    case "timeline":
+      return await runInspectionCommand("timeline.inspect");
+    case "render":
+      return await runInspectionCommand("render.inspect");
     case "resolve-diagnostics": {
       const diagnostics = await prefsChannel.readDiagnostics();
       if (!diagnostics) {
@@ -138,7 +174,7 @@ async function main(): Promise<number> {
         console.error("Usage: npm run resolve:read -- <request-id>");
         return 1;
       }
-      const response = await bridge.readResponse(assertRequestId(requestId));
+      const response = await bridge.readResponse(assertRequestId(requestId), 1500);
       if (!response) {
         const pending = await bridge.getPendingRequest();
         console.error(JSON.stringify({
@@ -181,6 +217,33 @@ async function main(): Promise<number> {
       console.error(`Unknown command: ${command}`);
       console.log(HELP);
       return 1;
+  }
+
+  async function runInspectionCommand(command: BridgeCommand): Promise<number> {
+    const request = createRequest(command, {
+      ...(timeoutOverride !== undefined ? { timeoutMs: timeoutOverride } : {})
+    });
+    const timeoutMs = timeoutOverride ?? settings.commandTimeoutMs;
+    await bridge.enqueue(request);
+
+    console.log(`Queued ${command} as ${request.id}`);
+    console.log("ACTION REQUIRED in DaVinci Resolve:");
+    console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    console.log(`Waiting up to ${Math.round(timeoutMs / 1000)} seconds...`);
+
+    try {
+      const response = await bridge.waitForResponse(request, timeoutMs);
+      console.log(JSON.stringify(response, null, 2));
+      return response.status === "success" ? 0 : 1;
+    } catch (error) {
+      if (error instanceof BridgeTimeoutError) {
+        console.error("NO RESPONSE - manual Lua trigger still required.");
+        console.error(error.message);
+        console.error(JSON.stringify({ requestId: request.id, details: error.details }, null, 2));
+        return error.exitCode;
+      }
+      throw error;
+    }
   }
 
   async function runConnectionTest(): Promise<number> {

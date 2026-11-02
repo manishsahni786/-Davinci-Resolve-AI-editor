@@ -105,6 +105,16 @@ export class FileBridge {
     const pending = await this.getPendingRequest();
     if (pending) {
       if (pending.id === request.id) {
+        if (pending.command !== request.command) {
+          throw new BridgeProtocolError(
+            "A pending request has the same id but a different command.",
+            {
+              requestId: request.id,
+              pendingCommand: pending.command,
+              requestedCommand: request.command
+            }
+          );
+        }
         if (!(await pathExists(this.luaRequestPath))) {
           await writeTextFileAtomic(this.luaRequestPath, serializeLuaRequest(request));
         }
@@ -235,36 +245,44 @@ export class FileBridge {
     );
   }
 
-  async readResponse(requestId: string): Promise<BridgeResponseEnvelope | null> {
+  async readResponse(requestId: string, waitMs = 0): Promise<BridgeResponseEnvelope | null> {
     const responsePath = this.responseFilePath(requestId);
-    try {
-      const text = await readTextFile(responsePath);
-      const response = parseResponse(parseJson(text, responsePath));
-      if (response.id !== requestId) {
-        throw new BridgeProtocolError("Response id does not match the requested id.", {
-          expected: requestId,
-          actual: response.id,
-          responsePath
-        });
-      }
-      await this.reconcile();
-      return response;
-    } catch (error) {
-      if (!isMissingFileError(error)) {
-        throw error;
-      }
-    }
+    const deadline = Date.now() + waitMs;
 
-    if (this.prefsChannel) {
-      const prefResponse = await this.prefsChannel.readResponse(requestId);
-      if (prefResponse) {
-        await this.persistResponse(prefResponse);
+    while (true) {
+      try {
+        const text = await readTextFile(responsePath);
+        const response = parseResponse(parseJson(text, responsePath));
+        if (response.id !== requestId) {
+          throw new BridgeProtocolError("Response id does not match the requested id.", {
+            expected: requestId,
+            actual: response.id,
+            responsePath
+          });
+        }
         await this.reconcile();
-        return prefResponse;
+        return response;
+      } catch (error) {
+        if (!isMissingFileError(error)) {
+          throw error;
+        }
       }
-    }
 
-    return null;
+      if (this.prefsChannel) {
+        const prefResponse = await this.prefsChannel.readResponse(requestId);
+        if (prefResponse) {
+          await this.persistResponse(prefResponse);
+          await this.reconcile();
+          return prefResponse;
+        }
+      }
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return null;
+      }
+      await sleep(Math.min(this.settings.pollIntervalMs, remaining));
+    }
   }
 
   async getPendingRequest(): Promise<PendingRequestInfo | null> {
@@ -330,6 +348,7 @@ export class FileBridge {
     await this.ensureInitialized();
     const pending = await this.getPendingRequest();
     const responses = await listFiles(this.settings.responsesDir, ".json");
+    const fusionState = this.prefsChannel ? await this.prefsChannel.readBridgeState() : null;
     return {
       initialized: this.initialized,
       requestsDir: this.settings.requestsDir,
@@ -340,7 +359,10 @@ export class FileBridge {
       resolveProcessRunning: runtime.resolveProcessRunning,
       externalScriptingPortListening: runtime.externalScriptingPortListening,
       fusionPrefsPath: this.prefsChannel?.filePath ?? null,
-      fusionPrefsPresent: this.prefsChannel ? await this.prefsChannel.exists() : false
+      fusionPrefsPresent: this.prefsChannel ? await this.prefsChannel.exists() : false,
+      fusionBridgeStage: fusionState?.stage ?? null,
+      fusionLastError: fusionState?.error || null,
+      fusionLastErrorAt: fusionState?.errorAt ?? null
     };
   }
 

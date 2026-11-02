@@ -132,9 +132,33 @@ A real success looks like:
 
 The test exits non-zero if Resolve is not connected, if the Lua script cannot obtain the Resolve object, or if no response arrives before the timeout.
 
-## 5. Verification checklist
+## 5. Read-only inspection commands
 
-Run these before starting Milestone 2:
+Milestone 2 adds four verified read-only commands. Queue one command at a time, trigger the Bridge menu, then read the response:
+
+```powershell
+npm run resolve:queue -- project.inspect
+npm run resolve:read -- <request-id>
+
+npm run resolve:queue -- media.inspect
+npm run resolve:queue -- timeline.inspect
+npm run resolve:queue -- render.inspect
+```
+
+Convenience commands queue and wait for one manual trigger:
+
+```powershell
+npm run resolve:project
+npm run resolve:media
+npm run resolve:timeline
+npm run resolve:render
+```
+
+If no timeline is open, `timeline.inspect` returns `TIMELINE_UNAVAILABLE`. To inspect track items, open or create a timeline first. `render.inspect` reports formats, codecs, presets and current format/codec; `Project.GetRenderSettings` is absent in this Free internal context and is therefore omitted without an error.
+
+## 6. Verification checklist
+
+Run these before starting Milestone 3:
 
 ```powershell
 npm test
@@ -158,7 +182,7 @@ and `meta.scriptContext` should indicate the predefined internal global. If it r
 
 Mutating commands are **not** retried automatically. A timeout leaves the request queued, and the response can be read later by id. This prevents a slow manual trigger from causing a duplicate timeline edit or render. Read-only diagnostics follow the same rule so behavior is predictable.
 
-## 6. Late responses and pending requests
+## 7. Late responses and pending requests
 
 If the Node command times out, the request is **not** deleted. It remains at:
 
@@ -187,7 +211,7 @@ npm run resolve:clear
 
 Clearing moves the request into `data\requests\archive\`.
 
-## 7. Why it is manual
+## 8. Why it is manual
 
 Resolve Free does not expose external scripting on this machine:
 
@@ -197,7 +221,7 @@ Resolve Free does not expose external scripting on this machine:
 
 Internal menu scripts can access the documented global `resolve`, but Resolve runs them synchronously on the UI thread. A background polling loop would freeze the application. The bridge therefore processes one request per manual trigger. This is a platform constraint, not an implementation shortcut.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### The AI Video Editor menu is missing
 
@@ -215,7 +239,21 @@ Resolve enumerates scripts **directly** under `Utility`, not scripts buried in a
 
 ### "no queued request"
 
-The bridge ran with nothing to process. Queue a command from Node first (`npm run resolve:test` or `npm run resolve:queue`).
+The bridge ran with nothing to process. Queue a command from Node first (`npm run resolve:test` or `npm run resolve:queue -- <command>`). If a request was just queued, trigger the Bridge again after the queue file is visible.
+
+### "REQUEST_ALREADY_PROCESSED"
+
+The request id was already handled, but its cached response is no longer available. Issue a new request instead of retrying the old id.
+
+### The Bridge reports an early error
+
+Check the stage and error keys:
+
+```powershell
+npm run resolve:error
+```
+
+`AIVEBridgeStage` shows where processing stopped. Common values are `no-request`, `request-loaded`, `response-published`, and `error`. Early transport errors are also written to `AIVEBridgeError` and `AIVEBridgeErrorAt`.
 
 ### "bridge_config.lua not found next to the script"
 
@@ -242,9 +280,13 @@ Check that these keys exist in `Fusion.prefs`:
 ```
 Global.AIVideoEditorBridgeResponseId
 Global.AIVideoEditorBridgeResponseHex
+Global.AIVideoEditorBridgeProcessedId
+Global.AIVEBridgeStage
+Global.AIVEBridgeError
+Global.AIVEBridgeErrorAt
 ```
 
-Also verify the request id matches, then run `npm run resolve:read -- <request-id>`. Node persists the response to `data\responses\<id>.response.json` when it reads it.
+Also verify the request id matches, then run `npm run resolve:read -- <request-id>`. The read retries briefly for a prefs flush, and Node persists the response to `data\responses\<id>.response.json` when it reads it. Processed ids are retained for idempotent replay (up to 20).
 
 ### The old `resolve_test.lua` still fails
 
@@ -254,7 +296,7 @@ That script is preserved on purpose. It calls `Resolve()` (external entry point)
 
 Expected on this Free installation. See [ENVIRONMENT_DIAGNOSTICS.md](ENVIRONMENT_DIAGNOSTICS.md). Do not enable undocumented registry hacks; the supported architecture is the internal Lua bridge.
 
-## 9. Logs
+## 10. Logs
 
 | File | Contents |
 | --- | --- |

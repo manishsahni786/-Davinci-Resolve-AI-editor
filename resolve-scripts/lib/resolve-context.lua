@@ -2,6 +2,16 @@
 
 local context = {}
 local unpackValues = unpack or table.unpack
+local resolveOverride = nil
+local ARRAY_METATABLE = { __jsontype = "array" }
+
+local function emptyArray()
+  return setmetatable({}, ARRAY_METATABLE)
+end
+
+function context.setResolve(value)
+  resolveOverride = value
+end
 
 local function safeCall(object, method, ...)
   if object == nil then
@@ -17,15 +27,74 @@ local function safeCall(object, method, ...)
   return nil, tostring(result)
 end
 
+local function isInternalKey(key)
+  return type(key) == "string" and key:sub(1, 2) == "__"
+end
+
+local function arrayItems(value)
+  if type(value) ~= "table" then
+    return emptyArray()
+  end
+  local keys = {}
+  for key in pairs(value) do
+    if type(key) == "number" and key >= 1 and key % 1 == 0 then
+      keys[#keys + 1] = key
+    end
+  end
+  table.sort(keys)
+  local items = emptyArray()
+  for _, key in ipairs(keys) do
+    items[#items + 1] = value[key]
+  end
+  return items
+end
+
+local function sortedEntries(value)
+  if type(value) ~= "table" then
+    return {}
+  end
+  local keys = {}
+  for key in pairs(value) do
+    if not isInternalKey(key) then
+      keys[#keys + 1] = key
+    end
+  end
+  table.sort(keys, function(left, right)
+    return tostring(left) < tostring(right)
+  end)
+  local entries = {}
+  for _, key in ipairs(keys) do
+    entries[#entries + 1] = { key = key, value = value[key] }
+  end
+  return entries
+end
+
 local function tableCount(value)
   if type(value) ~= "table" then
     return 0
   end
   local count = 0
-  for _ in pairs(value) do
-    count = count + 1
+  for key in pairs(value) do
+    if not isInternalKey(key) then
+      count = count + 1
+    end
   end
   return count
+end
+
+local function clampInteger(value, fallback, minimum, maximum)
+  local number = tonumber(value)
+  if number == nil then
+    return fallback
+  end
+  number = math.floor(number)
+  if number < minimum then
+    return minimum
+  end
+  if number > maximum then
+    return maximum
+  end
+  return number
 end
 
 local function copySelected(source, keys)
@@ -40,6 +109,9 @@ local function copySelected(source, keys)
 end
 
 function context.getResolve()
+  if resolveOverride ~= nil then
+    return resolveOverride, "injected test Resolve object"
+  end
   local resolveType = type(resolve)
   if resolve ~= nil and (resolveType == "userdata" or resolveType == "table") then
     return resolve, "predefined global 'resolve'"
@@ -83,7 +155,7 @@ function context.collect(options)
       packageCpath = type(package) == "table" and package.cpath or nil
     },
     connected = false,
-    errors = {}
+    errors = emptyArray()
   }
 
   local function record(message)
@@ -128,8 +200,8 @@ function context.collect(options)
   local projectList = safeCall(projectManager, "GetProjectListInCurrentFolder")
   info.projectManager = {
     currentFolder = safeCall(projectManager, "GetCurrentFolder"),
-    projectCount = tableCount(projectList),
-    projects = projectList
+    projectCount = #arrayItems(projectList),
+    projects = arrayItems(projectList)
   }
 
   local project, projectError = safeCall(projectManager, "GetCurrentProject")
@@ -197,10 +269,15 @@ function context.collect(options)
         clips = safeCall(rootFolder, "GetClips")
       end
     end
+    local clipItems = arrayItems(clips)
+    local clipNames = emptyArray()
+    for index = 1, math.min(#clipItems, 50) do
+      clipNames[index] = safeCall(clipItems[index], "GetName")
+    end
     info.mediaPool = {
       rootFolderName = rootFolder and safeCall(rootFolder, "GetName") or nil,
-      clipCount = tableCount(clips),
-      clips = clips
+      clipCount = #clipItems,
+      clips = clipNames
     }
   end
 
@@ -213,7 +290,7 @@ function context.collect(options)
     presets = renderPresets
   }
 
-  info.timelines = {}
+  info.timelines = emptyArray()
   if type(timelineCount) == "number" and timelineCount > 0 then
     for index = 1, math.min(timelineCount, 50) do
       local item = safeCall(project, "GetTimelineByIndex", index)
@@ -248,6 +325,451 @@ function context.ping()
     globals = info.globals,
     errors = info.errors
   }
+end
+
+local function hasMethod(object, method)
+  if object == nil then
+    return false
+  end
+  local ok, value = pcall(function()
+    return object[method]
+  end)
+  return ok and type(value) == "function"
+end
+
+local function recordCall(session, object, method, ...)
+  local value, callError = safeCall(object, method, ...)
+  if callError then
+    session.errors[#session.errors + 1] = method .. ": " .. callError
+  end
+  return value
+end
+
+local function optionalCall(session, object, method, ...)
+  if not hasMethod(object, method) then
+    return nil
+  end
+  return recordCall(session, object, method, ...)
+end
+
+local function createSession()
+  local session = {
+    connected = false,
+    errors = emptyArray()
+  }
+  local resolveObject, source = context.getResolve()
+  session.source = source
+  if resolveObject == nil then
+    session.errors[#session.errors + 1] = source
+    session.failure = {
+      code = "RESOLVE_UNAVAILABLE",
+      message = "The internal Resolve object is unavailable."
+    }
+    return session
+  end
+
+  session.resolve = resolveObject
+  session.version = recordCall(session, resolveObject, "GetVersionString")
+  session.isStudio = recordCall(session, resolveObject, "IsStudio")
+  session.manager = recordCall(session, resolveObject, "GetProjectManager")
+  if session.manager == nil then
+    session.failure = {
+      code = "PROJECT_MANAGER_UNAVAILABLE",
+      message = "Could not obtain the Resolve ProjectManager."
+    }
+    return session
+  end
+
+  session.project = recordCall(session, session.manager, "GetCurrentProject")
+  if session.project == nil then
+    session.failure = {
+      code = "PROJECT_UNAVAILABLE",
+      message = "No project is open in Resolve."
+    }
+    return session
+  end
+
+  session.projectName = recordCall(session, session.project, "GetName")
+  session.connected = true
+  return session
+end
+
+local function baseResult(session)
+  return {
+    connected = session.connected,
+    resolveVersion = session.version,
+    isStudio = session.isStudio == true,
+    projectName = session.projectName,
+    scriptContext = session.source,
+    errors = session.errors
+  }
+end
+
+local function stringMap(value)
+  local result = {}
+  if type(value) ~= "table" then
+    return result
+  end
+  for key, item in pairs(value) do
+    if not isInternalKey(key) then
+      result[tostring(key)] = item
+    end
+  end
+  return result
+end
+
+local function clipSummary(clip, session)
+  return {
+    name = recordCall(session, clip, "GetName"),
+    uniqueId = recordCall(session, clip, "GetUniqueId"),
+    mediaId = recordCall(session, clip, "GetMediaId"),
+    type = recordCall(session, clip, "GetClipProperty", "Type"),
+    filePath = recordCall(session, clip, "GetClipProperty", "File Path"),
+    duration = recordCall(session, clip, "GetClipProperty", "Duration"),
+    frames = recordCall(session, clip, "GetClipProperty", "Frames"),
+    resolution = recordCall(session, clip, "GetClipProperty", "Resolution"),
+    fps = recordCall(session, clip, "GetClipProperty", "FPS")
+  }
+end
+
+local function timelineSummary(timeline, session)
+  return {
+    name = recordCall(session, timeline, "GetName"),
+    uniqueId = recordCall(session, timeline, "GetUniqueId"),
+    startFrame = recordCall(session, timeline, "GetStartFrame"),
+    endFrame = recordCall(session, timeline, "GetEndFrame"),
+    startTimecode = recordCall(session, timeline, "GetStartTimecode"),
+    videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+    audioTracks = recordCall(session, timeline, "GetTrackCount", "audio"),
+    subtitleTracks = optionalCall(session, timeline, "GetTrackCount", "subtitle"),
+    settings = copySelected(recordCall(session, timeline, "GetSettings"), {
+      "useCustomSettings",
+      "timelineFrameRate",
+      "timelineResolutionWidth",
+      "timelineResolutionHeight",
+      "timelineOutputResolutionWidth",
+      "timelineOutputResolutionHeight"
+    })
+  }
+end
+
+local function timelineItemSummary(item, session)
+  return {
+    name = recordCall(session, item, "GetName"),
+    start = recordCall(session, item, "GetStart"),
+    finish = recordCall(session, item, "GetEnd"),
+    duration = recordCall(session, item, "GetDuration"),
+    trackType = optionalCall(session, item, "GetTrackType"),
+    trackIndex = optionalCall(session, item, "GetTrackIndex")
+  }
+end
+
+local function listTimelines(project, session)
+  local count = recordCall(session, project, "GetTimelineCount")
+  local timelines = emptyArray()
+  if type(count) ~= "number" then
+    return timelines
+  end
+  for index = 1, math.min(count, 100) do
+    local timeline = recordCall(session, project, "GetTimelineByIndex", index)
+    if timeline ~= nil then
+      timelines[#timelines + 1] = {
+        index = index,
+        name = recordCall(session, timeline, "GetName"),
+        uniqueId = recordCall(session, timeline, "GetUniqueId")
+      }
+    end
+  end
+  return timelines
+end
+
+local function markerList(timeline, session)
+  local markers = optionalCall(session, timeline, "GetMarkers")
+  local result = emptyArray()
+  if type(markers) ~= "table" then
+    return result
+  end
+  for frame, marker in pairs(markers) do
+    if type(frame) == "number" then
+      local entry = { frame = frame }
+      if type(marker) == "table" then
+        for key, value in pairs(marker) do
+          if not isInternalKey(key) then
+            entry[tostring(key)] = value
+          end
+        end
+      end
+      result[#result + 1] = entry
+    end
+  end
+  table.sort(result, function(left, right)
+    return left.frame < right.frame
+  end)
+  return result
+end
+
+function context.inspectProject(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local settings = recordCall(session, session.project, "GetSettings")
+  local timelineCount = recordCall(session, session.project, "GetTimelineCount")
+  local projectList = recordCall(session, session.manager, "GetProjectListInCurrentFolder")
+  local projectItems = arrayItems(projectList)
+
+  result.project = {
+    name = session.projectName,
+    uniqueId = recordCall(session, session.project, "GetUniqueId"),
+    timelineCount = timelineCount,
+    currentPage = recordCall(session, session.resolve, "GetCurrentPage"),
+    settings = copySelected(settings, {
+      "timelineFrameRate",
+      "timelineResolutionWidth",
+      "timelineResolutionHeight",
+      "timelinePlaybackFrameRate",
+      "colorScienceMode"
+    })
+  }
+  result.projectManager = {
+    currentFolder = recordCall(session, session.manager, "GetCurrentFolder"),
+    projectCount = #projectItems,
+    projects = projectItems
+  }
+  result.timelineCount = timelineCount
+  return result, nil
+end
+
+function context.inspectMedia(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local includeClips = options.includeClips ~= false
+  local maxClips = clampInteger(options.maxClips, 100, 1, 500)
+  local maxFolders = 100
+  local state = {
+    bins = emptyArray(),
+    folderCount = 0,
+    clipCount = 0,
+    emittedClips = 0,
+    truncated = false
+  }
+
+  local function inspectFolder(folder, path)
+    if folder == nil or state.folderCount >= maxFolders then
+      state.truncated = true
+      return
+    end
+    state.folderCount = state.folderCount + 1
+    local name = recordCall(session, folder, "GetName") or "Bin"
+    local clips = arrayItems(recordCall(session, folder, "GetClipList"))
+    local bin = {
+      name = name,
+      path = path,
+      clipCount = #clips,
+      clips = emptyArray()
+    }
+    state.clipCount = state.clipCount + #clips
+
+    if includeClips then
+      for index = 1, #clips do
+        if state.emittedClips >= maxClips then
+          bin.truncated = true
+          state.truncated = true
+          break
+        end
+        bin.clips[#bin.clips + 1] = clipSummary(clips[index], session)
+        state.emittedClips = state.emittedClips + 1
+      end
+    end
+
+    state.bins[#state.bins + 1] = bin
+
+    local subfolders = arrayItems(recordCall(session, folder, "GetSubFolderList"))
+    for _, subfolder in ipairs(subfolders) do
+      if state.folderCount >= maxFolders then
+        state.truncated = true
+        break
+      end
+      local subName = recordCall(session, subfolder, "GetName") or "Bin"
+      inspectFolder(subfolder, path .. "/" .. subName)
+    end
+  end
+
+  local rootFolder = recordCall(session, mediaPool, "GetRootFolder")
+  if rootFolder ~= nil then
+    inspectFolder(rootFolder, "")
+  end
+
+  result.mediaPool = {
+    rootFolderName = rootFolder and recordCall(session, rootFolder, "GetName") or nil,
+    folderCount = state.folderCount,
+    clipCount = state.clipCount,
+    emittedClips = state.emittedClips,
+    truncated = state.truncated,
+    bins = state.bins
+  }
+  return result, nil
+end
+
+function context.inspectTimeline(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local timeline
+  local requestedIndex = tonumber(options.timelineIndex)
+  if requestedIndex then
+    timeline = recordCall(session, session.project, "GetTimelineByIndex", math.floor(requestedIndex))
+  else
+    timeline = recordCall(session, session.project, "GetCurrentTimeline")
+  end
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_UNAVAILABLE",
+      message = requestedIndex
+        and ("No timeline exists at index " .. tostring(requestedIndex) .. ".")
+        or "No current timeline is open."
+    }
+    return result, result.failure
+  end
+
+  local includeClips = options.includeClips ~= false
+  local maxClips = clampInteger(options.maxClips, 200, 1, 500)
+  local summary = timelineSummary(timeline, session)
+  local tracks = { video = emptyArray(), audio = emptyArray(), subtitle = emptyArray() }
+  local emittedClips = 0
+  local truncated = false
+
+  for _, trackType in ipairs({ "video", "audio", "subtitle" }) do
+    local trackCount = summary[trackType .. "Tracks"]
+    if type(trackCount) ~= "number" then
+      trackCount = 0
+    end
+    for trackIndex = 1, math.min(trackCount, 100) do
+      local items = arrayItems(recordCall(
+        session,
+        timeline,
+        "GetItemListInTrack",
+        trackType,
+        trackIndex
+      ))
+      local track = {
+        index = trackIndex,
+        itemCount = #items,
+        items = emptyArray(),
+        truncated = false
+      }
+      if includeClips then
+        for index = 1, #items do
+          if emittedClips >= maxClips then
+            track.truncated = true
+            truncated = true
+            break
+          end
+          track.items[#track.items + 1] = timelineItemSummary(items[index], session)
+          emittedClips = emittedClips + 1
+        end
+      end
+      tracks[trackType][#tracks[trackType] + 1] = track
+    end
+  end
+
+  result.timeline = summary
+  result.timelineName = summary.name
+  result.tracks = tracks
+  result.markers = markerList(timeline, session)
+  result.emittedClips = emittedClips
+  result.truncated = truncated
+  result.timelines = listTimelines(session.project, session)
+  return result, nil
+end
+
+function context.inspectRender(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local current = recordCall(session, session.project, "GetCurrentRenderFormatAndCodec")
+  local formats = recordCall(session, session.project, "GetRenderFormats")
+  local presets = recordCall(session, session.project, "GetRenderPresetList")
+  local settings = optionalCall(session, session.project, "GetRenderSettings")
+
+  result.render = {
+    currentFormatAndCodec = current,
+    formats = stringMap(formats),
+    presets = stringMap(presets),
+    settings = copySelected(settings, {
+      "SelectAllFrames",
+      "TargetDir",
+      "CustomName",
+      "ExportVideo",
+      "ExportAudio",
+      "VideoQuality",
+      "AudioQuality"
+    })
+  }
+
+  if options.includeCodecs ~= false then
+    local format = type(current) == "table" and current.format or nil
+    if format then
+      result.render.codecs = stringMap(recordCall(
+        session,
+        session.project,
+        "GetRenderCodecs",
+        format
+      ))
+    end
+  end
+
+  if options.includeJobs == true then
+    local jobs = arrayItems(optionalCall(session, session.project, "GetRenderJobList"))
+    local jobList = emptyArray()
+    for index = 1, math.min(#jobs, 50) do
+      local job = jobs[index]
+      if type(job) == "table" then
+        local jobId = job.JobId or job.jobId
+        local entry = {
+          jobId = jobId,
+          name = job.JobName or job.jobName,
+          status = job.JobStatus or job.jobStatus
+        }
+        if jobId ~= nil then
+          entry.details = optionalCall(session, session.project, "GetRenderJobStatus", jobId)
+        end
+        jobList[#jobList + 1] = entry
+      end
+    end
+    result.render.jobs = jobList
+  end
+
+  return result, nil
 end
 
 function context.health(config, paths)

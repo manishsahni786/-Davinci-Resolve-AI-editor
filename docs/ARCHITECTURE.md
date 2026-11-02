@@ -93,7 +93,7 @@ Current implementation:
 - `resolve-scripts/lib/paths.lua` â€” config, atomic writes, logging.
 - `resolve-scripts/lib/resolve-context.lua` â€” read-only Resolve inspection and safe calls.
 
-The Lua side deliberately implements **no editing commands** in Milestone 1.
+The Lua side deliberately implements **no editing commands** in Milestones 1-2. The bridge response channel is in `resolve-scripts/lib/prefs.lua`.
 
 ### Python worker
 
@@ -163,15 +163,21 @@ Workspace > Scripts > Utility > AI Video Editor Bridge
 The response preferences are:
 
 ```
-Global.AIVideoEditorBridgeResponseId   -> hex(request id)
-Global.AIVideoEditorBridgeResponseHex  -> hex(response JSON)
+Global.AIVideoEditorBridgeResponseId    -> hex(request id)
+Global.AIVideoEditorBridgeResponseHex   -> hex(response JSON)
+Global.AIVideoEditorBridgeProcessedId   -> comma-separated recent request ids (max 20)
+Global.AIVEBridgeStage                  -> request-loaded | response-published | no-request | error
+Global.AIVEBridgeError                  -> last early transport error
+Global.AIVEBridgeErrorAt                -> last early error timestamp
 ```
+
+Request ids are retained for idempotent replay. If the same id is triggered again, the bridge republishes the cached response instead of re-running the command. If the id is known but no cached response remains, it returns `REQUEST_ALREADY_PROCESSED`.
 
 Resolve Free's internal Lua sandbox has `io = nil`; it cannot write files. The Lua side therefore never writes responses directly.
 
 ### Read
 
-Node polls for the response at `pollIntervalMs`, first checking the local response folder and then the Fusion preferences file. It validates the response against the Zod schema, checks that the id and command match, persists a local copy, logs it, and returns it. On timeout, it throws `BRIDGE_TIMEOUT` and leaves the request queued.
+Node polls for the response at `pollIntervalMs`, first checking the local response folder and then the Fusion preferences file. It validates the response against the Zod schema, checks that the id and command match, persists a local copy, logs it, and returns it. On timeout, it throws `BRIDGE_TIMEOUT` and leaves the request queued. `resolve:read` retries briefly so a response published during the read is not missed while Fusion flushes its preferences file.
 
 Late responses can be read with:
 
@@ -219,7 +225,10 @@ Statuses:
 | `BRIDGE_TIMEOUT` | No response before the deadline; request still queued | Run the Lua bridge |
 | `BRIDGE_BUSY` | Another request is pending | Process or clear it |
 | `BRIDGE_PROTOCOL_ERROR` | Malformed/mismatched JSON | Inspect logs |
+| `REQUEST_ALREADY_PROCESSED` | Request id was processed, but no replayable response remains | Issue a new request |
+| `UNSUPPORTED_COMMAND` | Command is not in the bridge whitelist | Use a supported command |
 | `RESOLVE_UNAVAILABLE` | Lua could not obtain the Resolve object | Inspect diagnostics |
+| `TIMELINE_UNAVAILABLE` | No current timeline is open or the requested index does not exist | Open or create a timeline |
 | `VALIDATION_ERROR` | Bad tool input or path | Correct input |
 | `UNSUPPORTED_FEATURE` | Capability is not available | Use an alternative |
 | `INTERNAL_ERROR` | Unexpected failure | Inspect logs |
@@ -271,7 +280,7 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | 1 | Diagnostics, Resolve connection, Fusion prefs bridge | Verified live (`resolveConnected: true`) |
-| 2 | Lua bridge command expansion and transport hardening | Not started |
+| 2 | Lua bridge command expansion and transport hardening | Verified live (project, media, timeline and render inspection) |
 | 3 | MCP server and basic Resolve tools | Not started |
 | 4 | Project and media management | Not started |
 | 5 | Timeline inspection and editing | Not started |

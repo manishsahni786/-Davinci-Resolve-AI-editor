@@ -1,8 +1,9 @@
 # Environment Diagnostics
 
 Date: 2026-10-30  
-Project: AI Video Editor (OpenCode + DaVinci Resolve Free 21.1)  
-Milestone: 1 â€” environment inspection, connection architecture, diagnostics and bridge
+Updated: 2026-11-02
+Project: AI Video Editor (OpenCode + DaVinci Resolve Free 21.1)
+Milestones: 1-2 - environment inspection, bridge, and verified read-only inspection
 
 This report separates measured facts from assumptions. Anything not yet exercised inside Resolve is marked **supported but not yet tested**, not "working".
 
@@ -25,7 +26,7 @@ This report separates measured facts from assumptions. Anything not yet exercise
 | --- | --- | --- |
 | Node.js | v22.22.0 | Meets project requirement (`>=20.11`) |
 | npm | 10.9.4 | `npm install` succeeded |
-| Git | 2.40.0.windows.1 | Repository present, no commits yet |
+| Git | 2.40.0.windows.1 | Repository present; initial commit `0274cdb` pushed to `main` |
 | Python | 3.12.10 at `D:\Softwares\python.exe` | Runs; **pip is not installed** |
 | FFmpeg | Not found on PATH | `ffmpeg -version` / `where ffmpeg` fail |
 | FFprobe | Not found on PATH | `ffprobe -version` / `where ffprobe` fail |
@@ -192,10 +193,11 @@ Verified by automated tests and by manual menu invocation inside the running Res
 | --- | --- |
 | Workspace > Scripts menu Lua execution | Verified by manual Bridge invocation |
 | Internal Resolve object | `resolveConnected: true`, version `21.1.0.17` |
-| Node/TypeScript project toolchain | typecheck + 21 unit tests passed |
+| Node/TypeScript project toolchain | typecheck + 28 unit tests passed |
 | File bridge mechanics | Unit tests, prefs test, and mock adapter |
 | Fusion prefs response channel | Live Resolve round-trip + unit test |
-| Lua JSON and protocol | 13 Lua tests passed |
+| Read-only inspection commands | Live `project.inspect`, `media.inspect`, `timeline.inspect` and `render.inspect` all returned `ok: true` |
+| Lua JSON and protocol | 38 Lua tests passed |
 | Python stdlib worker protocol | 5 Python tests passed |
 | Internal script installation without overwriting old scripts | Installer backup + separate folder |
 
@@ -203,9 +205,8 @@ Verified by automated tests and by manual menu invocation inside the running Res
 
 | Capability | Why it is plausible | What must happen |
 | --- | --- | --- |
-| Internal `resolve` global | Official README documents it | Run `resolve:test` and trigger the bridge |
 | Project create/open/save/list | `ProjectManager` methods in `DaVinciResolveScript.pyi` | Milestone 4 |
-| Media import / media pool inspection | `MediaPool.ImportMedia`, `Folder.GetClipList` | Milestone 4 |
+| Media import | `MediaPool.ImportMedia` | Milestone 4 |
 | Timeline creation and editing | `CreateEmptyTimeline`, `DeleteClips`, `SetProperties`, `AddTransition` | Milestone 5 |
 | MP4/H.264 render queue | `AddRenderJob`, `SetRenderSettings`, `StartRendering` | Milestone 6; query codecs at runtime |
 | Resolve-native scene cuts | `Timeline.DetectSceneCuts` | Milestone 7 |
@@ -240,7 +241,7 @@ Verified by automated tests and by manual menu invocation inside the running Res
 ## 7. Blockers and risks
 
 1. **Manual trigger latency.** Every Resolve command needs a user action until/unless a supported asynchronous mechanism is found. The MCP server must surface this clearly rather than hanging silently.
-2. **Internal `resolve` global not yet observed.** It is documented, but not proven on this exact build. This is the single verification gate for Milestone 1.
+2. **Optional API availability differs in Free.** `Project.GetRenderSettings` is absent from the verified internal context; optional methods are guarded and omitted rather than treated as failures.
 3. **No pip and no FFmpeg.** Media analysis cannot start until both are addressed.
 4. **Free/Studio API differences.** Codec lists, transcription, AI features and some render options must be queried at runtime. No codec or Studio-only method will be hard-coded as available.
 5. **Sandbox and prefs limits.** Internal Lua has no `io`, so response delivery depends on Fusion preferences. `fusion:SavePrefs` is a best-effort UI-thread write; Node validates the response and still treats timeouts as failures. Local response persistence and request archiving are handled by Node.
@@ -268,6 +269,12 @@ npm run resolve:install-scripts
 # Queue a real Resolve ping and wait
 npm run resolve:test
 
+# Read-only inspection
+npm run resolve:project
+npm run resolve:media
+npm run resolve:timeline
+npm run resolve:render
+
 # If it times out, trigger the bridge in Resolve, then read the response
 npm run resolve:read -- <request-id>
 
@@ -285,6 +292,11 @@ Milestone 1 is complete when all of the following are true:
 - [x] File bridge implemented with ids, atomic writes, timeouts, validation, logging and recovery.
 - [x] Lua bridge and diagnostics scripts implemented.
 - [x] Tests and mock adapter pass without Resolve.
-- [ ] **Manual:** `npm run resolve:test` returns `resolveConnected: true` after the Scripts-menu trigger.
+- [x] **Manual:** `npm run resolve:test` returns `resolveConnected: true` after the Scripts-menu trigger.
 
-The unchecked item is intentionally left unchecked until the user runs the script inside Resolve and returns the result.
+## 10. Milestone 2 exit criteria
+
+- [x] Project, media pool, timeline and render inspection implemented.
+- [x] Transport idempotency, early error/stage reporting, and stale response recovery.
+- [x] All four inspection commands verified live in Resolve Free `21.1.0.17`.
+- [x] TypeScript, Lua and Python tests pass.

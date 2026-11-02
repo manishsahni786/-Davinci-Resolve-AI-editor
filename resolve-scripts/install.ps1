@@ -87,6 +87,18 @@ local function aivePublish(key, value)
   end
 end
 
+local function aiveRead(key)
+  if type(fusion) == "userdata" or type(fusion) == "table" then
+    local ok, value = pcall(function()
+      return fusion:GetPrefs(key)
+    end)
+    if ok then
+      return value
+    end
+  end
+  return nil
+end
+
 AIVE_SCRIPT_DIR = [==[$TargetRoot]==]
 aivePublish("Global.AIVEBridgeError", "")
 aivePublish("Global.AIVEBridgeStage", "$($launcher.Label)-start")
@@ -100,7 +112,7 @@ local ok, message = pcall(chunk, AIVE_SCRIPT_DIR)
 if not ok then
   aivePublish("Global.AIVEBridgeError", tostring(message))
   print("AI Video Editor $($launcher.Label) failed: " .. tostring(message))
-else
+elseif aiveRead("Global.AIVEBridgeStage") == "$($launcher.Label)-start" then
   aivePublish("Global.AIVEBridgeStage", "$($launcher.Label)-done")
 end
 "@

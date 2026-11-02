@@ -17,6 +17,12 @@ describe("resolve capability matrix", () => {
     expect(capability?.status).toBe("verified");
   });
 
+  it("records read-only inspection as verified after live Resolve checks", () => {
+    const capability = getCapability("resolve.inspection-readonly");
+    expect(capability?.status).toBe("verified");
+    expect(capability?.implemented).toBe(true);
+  });
+
   it("marks background polling as unsupported instead of pretending it works", () => {
     const capability = getCapability("bridge.background-polling");
     expect(capability?.status).toBe("unsupported");

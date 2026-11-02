@@ -24,6 +24,11 @@ local function escapeString(value)
   end) .. '"'
 end
 
+local function isMarkedArray(value)
+  local metatable = getmetatable(value)
+  return metatable ~= nil and metatable.__jsontype == "array"
+end
+
 local function isArray(value)
   local count = 0
   for key in pairs(value) do
@@ -57,9 +62,10 @@ local function encodeValue(value, seen)
     seen[value] = true
 
     local array, count = isArray(value)
-    if array then
+    if array or isMarkedArray(value) then
+      local length = array and count or #value
       local parts = {}
-      for index = 1, count do
+      for index = 1, length do
         parts[index] = encodeValue(value[index], seen)
       end
       seen[value] = nil

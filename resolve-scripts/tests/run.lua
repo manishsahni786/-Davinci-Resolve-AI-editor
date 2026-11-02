@@ -36,6 +36,9 @@ check(nested.a.b[1] == true and nested.a.b[2] == false and nested.a.b[3] == json
 
 check(json.encode({}) == "{}", "empty object")
 check(json.encode({ 1, 2 }) == "[1,2]", "array encode")
+local markedEmpty = setmetatable({}, { __jsontype = "array" })
+check(json.encode(markedEmpty) == "[]", "marked empty array")
+check(json.encode({ items = markedEmpty }) == '{"items":[]}', "nested marked empty array")
 
 local ok = pcall(json.decode, '{"broken":')
 check(not ok, "invalid JSON must fail")
@@ -44,4 +47,135 @@ local escaped = json.encode({ text = 'line\n"quote"' })
 local escapedRoundTrip = json.decode(escaped)
 check(escapedRoundTrip.text == 'line\n"quote"', "escaping round trip")
 
-print("Lua JSON tests passed: " .. tostring(passed))
+local previousResolve = resolve
+local clip = {
+  GetName = function() return "clip1.mov" end,
+  GetUniqueId = function() return "clip-id-1" end,
+  GetMediaId = function() return "media-id-1" end,
+  GetClipProperty = function(_, key)
+    local properties = {
+      ["Type"] = "Video",
+      ["File Path"] = "C:\\media\\clip1.mov",
+      ["Duration"] = "00:00:10:00",
+      ["Frames"] = "240",
+      ["Resolution"] = "1920x1080",
+      ["FPS"] = "24"
+    }
+    return properties[key]
+  end
+}
+local rootFolder = {
+  __flags = 4194304,
+  [1] = clip,
+  GetName = function() return "Master" end,
+  GetClipList = function() return { __flags = 4194304, [1] = clip } end,
+  GetSubFolderList = function() return { __flags = 4194304 } end
+}
+local item = {
+  GetName = function() return "clip1.mov" end,
+  GetStart = function() return 0 end,
+  GetEnd = function() return 239 end,
+  GetDuration = function() return 240 end,
+  GetTrackType = function() return "video" end,
+  GetTrackIndex = function() return 1 end
+}
+local timeline = {
+  GetName = function() return "Timeline 1" end,
+  GetUniqueId = function() return "timeline-id-1" end,
+  GetStartFrame = function() return 0 end,
+  GetEndFrame = function() return 239 end,
+  GetStartTimecode = function() return "01:00:00:00" end,
+  GetTrackCount = function(_, kind) return kind == "subtitle" and 0 or 1 end,
+  GetSettings = function() return { timelineFrameRate = "24" } end,
+  GetItemListInTrack = function(_, kind, index)
+    if kind == "video" and index == 1 then
+      return { __flags = 4194304, [1] = item }
+    end
+    return { __flags = 4194304 }
+  end,
+  GetMarkers = function() return { __flags = 4194304, [100] = { name = "Marker A" } } end
+}
+local project = {
+  GetName = function() return "Fake Project" end,
+  GetUniqueId = function() return "project-id-1" end,
+  GetSettings = function() return { timelineResolutionWidth = "1920", timelineResolutionHeight = "1080" } end,
+  GetTimelineCount = function() return 1 end,
+  GetCurrentTimeline = function() return timeline end,
+  GetTimelineByIndex = function(_, index) return index == 1 and timeline or nil end,
+  GetMediaPool = function() return { GetRootFolder = function() return rootFolder end } end,
+  GetCurrentRenderFormatAndCodec = function() return { format = "mp4", codec = "H264" } end,
+  GetRenderFormats = function() return { __flags = 4194304, MP4 = "mp4", QuickTime = "mov" } end,
+  GetRenderCodecs = function(_, format) return { __flags = 4194304, H264 = "H264", H265 = "H265" } end,
+  GetRenderPresetList = function() return { __flags = 4194304, [1] = "H.264 Master" } end,
+  GetRenderSettings = function() return { SelectAllFrames = true, TargetDir = "C:\\renders" } end,
+  GetRenderJobList = function() return { __flags = 4194304 } end,
+  GetRenderJobStatus = function() return nil end
+}
+local manager = {
+  GetCurrentProject = function() return project end,
+  GetProjectListInCurrentFolder = function() return { __flags = 4194304, [1] = "Fake Project" } end,
+  GetCurrentFolder = function() return "" end
+}
+resolve = {
+  GetVersionString = function() return "21.1.0.17" end,
+  IsStudio = function() return false end,
+  GetCurrentPage = function() return "media" end,
+  GetProjectManager = function() return manager end
+}
+
+local context = dofile(root .. "\\lib\\resolve-context.lua")
+context.setResolve(resolve)
+local projectResult, projectFailure = context.inspectProject({})
+check(projectFailure == nil and projectResult.project.name == "Fake Project", "project inspection")
+check(projectResult.projectManager.projectCount == 1, "project list ignores internal keys")
+check(json.decode(json.encode(projectResult)).project.name == "Fake Project", "project result JSON")
+
+local mediaResult, mediaFailure = context.inspectMedia({})
+check(mediaFailure == nil and mediaResult.mediaPool.clipCount == 1, "media clip count")
+check(mediaResult.mediaPool.bins[1].clips[1].name == "clip1.mov", "media clip summary")
+
+local timelineResult, timelineFailure = context.inspectTimeline({})
+check(timelineFailure == nil and timelineResult.timeline.name == "Timeline 1", "timeline inspection")
+check(timelineResult.tracks.video[1].itemCount == 1, "timeline track item count")
+check(timelineResult.markers[1].frame == 100, "timeline markers")
+check(timelineResult.timelines[1].name == "Timeline 1", "timeline list")
+
+local renderResult, renderFailure = context.inspectRender({ includeJobs = true })
+check(renderFailure == nil and renderResult.render.formats.MP4 == "mp4", "render formats")
+check(renderResult.render.codecs.H264 == "H264", "render codecs")
+check(renderResult.render.currentFormatAndCodec.codec == "H264", "render current codec")
+
+local savedRenderSettings = project.GetRenderSettings
+project.GetRenderSettings = nil
+local optionalRenderResult, optionalRenderFailure = context.inspectRender({})
+check(optionalRenderFailure == nil and optionalRenderResult.render.formats.MP4 == "mp4", "render without optional settings")
+check(#optionalRenderResult.errors == 0, "missing optional render method is not an error")
+project.GetRenderSettings = savedRenderSettings
+
+local prefs = dofile(root .. "\\lib\\prefs.lua")
+local store = {}
+local fakeFusion = {}
+function fakeFusion:GetPrefs(key)
+  return store[key]
+end
+function fakeFusion:SetPrefs(key, value)
+  store[key] = value
+end
+function fakeFusion:SavePrefs()
+  return true
+end
+prefs.setFusion(fakeFusion)
+check(prefs.available(), "prefs availability")
+check(prefs.publishResponse("id-1", '{"value":1}', true), "prefs publish")
+check(prefs.hasProcessed("id-1"), "prefs idempotency")
+check(prefs.responseJsonFor("id-1") == '{"value":1}', "prefs response replay")
+check(prefs.publishResponse("id-2", '{"value":2}', true), "prefs publish second")
+check(prefs.hasProcessed("id-1") and prefs.hasProcessed("id-2"), "prefs keeps processed ids")
+check(prefs.processedIds()[1] == "id-1", "prefs processed order")
+prefs.recordError("boom")
+check(prefs.get(prefs.KEYS.error) == "boom", "prefs error reporting")
+prefs.setStage("test-stage")
+check(prefs.get(prefs.KEYS.stage) == "test-stage", "prefs stage")
+
+resolve = previousResolve
+print("Lua tests passed: " .. tostring(passed))

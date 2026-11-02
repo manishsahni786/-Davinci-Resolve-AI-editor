@@ -53,4 +53,7 @@ export interface BridgeHealth {
   externalScriptingPortListening: boolean;
   fusionPrefsPath: string | null;
   fusionPrefsPresent: boolean;
+  fusionBridgeStage: string | null;
+  fusionLastError: string | null;
+  fusionLastErrorAt: string | null;
 }

@@ -19,7 +19,21 @@ export const MILESTONE_1_COMMANDS = [
   "bridge.health"
 ] as const;
 
+export const INSPECTION_COMMANDS = [
+  "project.inspect",
+  "media.inspect",
+  "timeline.inspect",
+  "render.inspect"
+] as const;
+
+export const BRIDGE_COMMANDS = [
+  ...MILESTONE_1_COMMANDS,
+  ...INSPECTION_COMMANDS
+] as const;
+
 export type Milestone1Command = (typeof MILESTONE_1_COMMANDS)[number];
+export type InspectionCommand = (typeof INSPECTION_COMMANDS)[number];
+export type BridgeCommand = (typeof BRIDGE_COMMANDS)[number];
 
 const requestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 const isoDateSchema = z.string().min(1);
@@ -172,6 +186,46 @@ export function createResponse(options: {
 
 export function isKnownMilestone1Command(command: string): command is Milestone1Command {
   return (MILESTONE_1_COMMANDS as readonly string[]).includes(command);
+}
+
+export function isKnownBridgeCommand(command: string): command is BridgeCommand {
+  return (BRIDGE_COMMANDS as readonly string[]).includes(command);
+}
+
+export const COMMAND_PAYLOAD_SCHEMAS = {
+  "project.inspect": z.object({
+    includeProjects: z.boolean().optional()
+  }).strict(),
+  "media.inspect": z.object({
+    includeClips: z.boolean().optional(),
+    maxClips: z.number().int().min(1).max(500).optional()
+  }).strict(),
+  "timeline.inspect": z.object({
+    timelineIndex: z.number().int().min(1).max(1000).optional(),
+    includeClips: z.boolean().optional(),
+    maxClips: z.number().int().min(1).max(500).optional()
+  }).strict(),
+  "render.inspect": z.object({
+    includeJobs: z.boolean().optional(),
+    includeCodecs: z.boolean().optional()
+  }).strict()
+} as const;
+
+export function validateCommandPayload(
+  command: BridgeCommand,
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  const schema = (COMMAND_PAYLOAD_SCHEMAS as Record<string, z.ZodTypeAny | undefined>)[command];
+  if (!schema) {
+    return payload;
+  }
+  const result = schema.safeParse(payload);
+  if (!result.success) {
+    throw new BridgeProtocolError(`Invalid payload for ${command}.`, {
+      issues: result.error.issues
+    });
+  }
+  return result.data as Record<string, unknown>;
 }
 
 export function responseFileName(requestId: string): string {
