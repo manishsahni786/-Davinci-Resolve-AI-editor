@@ -1,0 +1,38 @@
+import { describe, expect, it } from "vitest";
+import {
+  getCapability,
+  listCapabilities,
+  summarizeCapabilities
+} from "../src/resolve/resolve-capabilities.js";
+
+describe("resolve capability matrix", () => {
+  it("records external scripting as restricted on Resolve Free", () => {
+    const capability = getCapability("resolve.external-scripting");
+    expect(capability?.status).toBe("restricted-free");
+    expect(capability?.implemented).toBe(false);
+  });
+
+  it("records the internal Scripts menu as verified", () => {
+    const capability = getCapability("resolve.internal-script-menu");
+    expect(capability?.status).toBe("verified");
+  });
+
+  it("marks background polling as unsupported instead of pretending it works", () => {
+    const capability = getCapability("bridge.background-polling");
+    expect(capability?.status).toBe("unsupported");
+  });
+
+  it("does not mark timeline editing as verified yet", () => {
+    const capability = getCapability("resolve.timeline-editing");
+    expect(capability?.status).toBe("supported-untested");
+    expect(capability?.implemented).toBe(false);
+  });
+
+  it("returns a complete five-category summary", () => {
+    const summary = summarizeCapabilities();
+    expect(Object.keys(summary)).toHaveLength(5);
+    expect(summary.verified).toBeGreaterThan(0);
+    expect(summary["restricted-free"]).toBeGreaterThan(0);
+    expect(listCapabilities().length).toBeGreaterThan(summary.verified);
+  });
+});

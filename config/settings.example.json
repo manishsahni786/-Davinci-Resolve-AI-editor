@@ -1,0 +1,8 @@
+{
+  "resolveInstallDir": "D:\\Softwares\\New Folder",
+  "dataDir": "C:\\Users\\manis\\OneDrive\\Desktop\\Divinci+ Opencode\\data",
+  "logsDir": "C:\\Users\\manis\\OneDrive\\Desktop\\Divinci+ Opencode\\logs",
+  "commandTimeoutMs": 120000,
+  "pollIntervalMs": 500,
+  "logLevel": "info"
+}

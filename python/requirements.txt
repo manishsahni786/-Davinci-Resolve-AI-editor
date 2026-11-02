@@ -1,0 +1,10 @@
+# Milestone 1 requires no third-party Python packages.
+# Candidate dependencies for Milestone 7 are intentionally not installed yet.
+#
+# Install these in python/.venv after reviewing the Windows wheels and pinning versions:
+# imageio-ffmpeg
+# numpy
+# opencv-python
+# scenedetect
+# Pillow
+# faster-whisper

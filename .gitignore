@@ -1,0 +1,39 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+config/settings.json
+
+# Installer backups
+backups/
+
+# Runtime data
+data/requests/*.json
+data/requests/*.lua
+data/requests/archive/
+data/responses/*.json
+data/projects/
+data/media/
+logs/*
+!logs/.gitkeep
+!data/requests/.gitkeep
+!data/responses/.gitkeep
+!data/projects/.gitkeep
+!data/media/.gitkeep
+
+# Python
+python/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editors
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

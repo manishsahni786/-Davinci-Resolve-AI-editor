@@ -1,0 +1,42 @@
+{
+  "name": "ai-video-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Video Editor: OpenCode MCP server, Python media workers, and a DaVinci Resolve Lua bridge.",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts",
+    "status": "tsx src/index.ts status",
+    "diagnostics": "tsx src/index.ts diagnostics",
+    "capabilities": "tsx src/index.ts capabilities",
+    "resolve:test": "tsx src/index.ts test",
+    "resolve:queue": "tsx src/index.ts queue",
+    "resolve:read": "tsx src/index.ts read",
+    "resolve:diagnostics": "tsx src/index.ts resolve-diagnostics",
+    "resolve:clear": "tsx src/index.ts clear",
+    "resolve:install-scripts": "powershell -NoProfile -ExecutionPolicy Bypass -File resolve-scripts/install.ps1",
+    "resolve:mock": "tsx src/index.ts mock",
+    "lua:test": "powershell -NoProfile -ExecutionPolicy Bypass -File resolve-scripts/test.ps1",
+    "python:check": "python python/check_environment.py",
+    "python:worker": "python python/worker.py",
+    "python:test": "python python/tests/test_worker.py",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run tests/integration",
+    "check": "npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
