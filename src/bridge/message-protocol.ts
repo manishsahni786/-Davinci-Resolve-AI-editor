@@ -26,17 +26,60 @@ export const INSPECTION_COMMANDS = [
   "render.inspect"
 ] as const;
 
+export const MANAGEMENT_COMMANDS = [
+  "project.create",
+  "project.open",
+  "project.save",
+  "media.createBin",
+  "media.import"
+] as const;
+
 export const BRIDGE_COMMANDS = [
   ...MILESTONE_1_COMMANDS,
-  ...INSPECTION_COMMANDS
+  ...INSPECTION_COMMANDS,
+  ...MANAGEMENT_COMMANDS
 ] as const;
 
 export type Milestone1Command = (typeof MILESTONE_1_COMMANDS)[number];
 export type InspectionCommand = (typeof INSPECTION_COMMANDS)[number];
+export type ManagementCommand = (typeof MANAGEMENT_COMMANDS)[number];
 export type BridgeCommand = (typeof BRIDGE_COMMANDS)[number];
 
 const requestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 const isoDateSchema = z.string().min(1);
+
+const controlCharacters = /[\u0000-\u001f]/;
+const invalidWindowsNameCharacters = /[<>:"/\\|?*]/;
+
+function isSafeName(value: string, maxLength: number): boolean {
+  return value.length > 0
+    && value.length <= maxLength
+    && !controlCharacters.test(value)
+    && !invalidWindowsNameCharacters.test(value)
+    && value !== "."
+    && value !== "..";
+}
+
+function isSafeBinPath(value: string): boolean {
+  if (value === "") {
+    return true;
+  }
+  const parts = value.split("/");
+  return parts.length <= 32 && parts.every((part) => isSafeName(part, 120));
+}
+
+const nameSchema = z.string().trim().max(120).refine(
+  (value) => isSafeName(value, 120),
+  "Use a non-empty name without control characters or <>:\"/\\|?*."
+);
+const filePathSchema = z.string().trim().min(1).max(32767).refine(
+  (value) => !controlCharacters.test(value),
+  "File paths must not contain control characters."
+);
+const binPathSchema = z.string().trim().max(4096).refine(
+  isSafeBinPath,
+  "Bin paths must be slash-separated names without empty, '.' or '..' segments."
+);
 
 export const BridgeRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -208,6 +251,23 @@ export const COMMAND_PAYLOAD_SCHEMAS = {
   "render.inspect": z.object({
     includeJobs: z.boolean().optional(),
     includeCodecs: z.boolean().optional()
+  }).strict(),
+  "project.create": z.object({
+    name: nameSchema,
+    mediaPath: filePathSchema.optional()
+  }).strict(),
+  "project.open": z.object({
+    name: nameSchema,
+    saveCurrent: z.boolean().optional()
+  }).strict(),
+  "project.save": z.object({}).strict(),
+  "media.createBin": z.object({
+    name: nameSchema,
+    parentPath: binPathSchema.optional()
+  }).strict(),
+  "media.import": z.object({
+    filePaths: z.array(filePathSchema).min(1).max(100),
+    binPath: binPathSchema.optional()
   }).strict()
 } as const;
 

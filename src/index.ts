@@ -19,7 +19,7 @@ import { assertRequestId } from "./utils/validation.js";
 import { writeTextFileAtomic } from "./utils/file-utils.js";
 
 const HELP = `
-AI Video Editor - Milestone 2 (Resolve inspection commands)
+AI Video Editor - Milestone 4 (Resolve inspection and project/media management)
 
 Usage:
   npm run status                 Show environment, bridge and capability status.
@@ -33,12 +33,24 @@ Usage:
   npm run resolve:media          Inspect the media pool.
   npm run resolve:timeline       Inspect the current timeline.
   npm run resolve:render         Inspect render formats, codecs and presets.
+  npm run resolve:project-create -- "<name>" [--media-path=<path>]
+                                 Create and open a new project.
+  npm run resolve:project-open -- "<name>" [--save-current]
+                                 Open an existing project.
+  npm run resolve:project-save   Save the current project.
+  npm run resolve:bin-create -- "<name>" [--parent=<bin/path>]
+                                 Create a media pool bin.
+  npm run resolve:media-import -- <path> [<path>...] [--bin=<bin/path>]
+                                 Import media into the current or target bin.
   npm run resolve:diagnostics    Read the report published by the Diagnostics menu item.
   npm run resolve:clear          Archive a pending request without processing it.
   npm run resolve:mock           Run a mock Resolve adapter (no Resolve required).
 
 Inspection commands:
   project.inspect, media.inspect, timeline.inspect, render.inspect
+
+Management commands:
+  project.create, project.open, project.save, media.createBin, media.import
 
 Options:
   --timeout-ms=<number>          Override the bridge wait timeout.
@@ -61,6 +73,16 @@ function parseTimeout(args: string[]): number | undefined {
     });
   }
   return parsed;
+}
+
+function optionValue(args: string[], name: string): string | undefined {
+  const prefix = `--${name}=`;
+  const value = args.find((arg) => arg.startsWith(prefix));
+  return value?.slice(prefix.length);
+}
+
+function positionalArgs(args: string[]): string[] {
+  return args.slice(1).filter((arg) => !arg.startsWith("--"));
 }
 
 async function main(): Promise<number> {
@@ -123,7 +145,7 @@ async function main(): Promise<number> {
       const requestedCommand = args.slice(1).find((arg) => !arg.startsWith("--")) ?? "diagnostics.ping";
       if (!isKnownBridgeCommand(requestedCommand)) {
         console.error(`Unknown bridge command: ${requestedCommand}`);
-        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect");
+        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect, project.create, project.open, project.save, media.createBin, media.import");
         return 1;
       }
       const request = createRequest(requestedCommand, {
@@ -156,6 +178,55 @@ async function main(): Promise<number> {
       return await runInspectionCommand("timeline.inspect");
     case "render":
       return await runInspectionCommand("render.inspect");
+    case "project-create": {
+      const name = positionalArgs(args)[0];
+      if (!name) {
+        console.error('Usage: npm run resolve:project-create -- "<name>" [--media-path=<path>]');
+        return 1;
+      }
+      const mediaPath = optionValue(args, "media-path");
+      return await runManagementCommand("project.create", {
+        name,
+        ...(mediaPath !== undefined ? { mediaPath } : {})
+      });
+    }
+    case "project-open": {
+      const name = positionalArgs(args)[0];
+      if (!name) {
+        console.error('Usage: npm run resolve:project-open -- "<name>" [--save-current]');
+        return 1;
+      }
+      return await runManagementCommand("project.open", {
+        name,
+        saveCurrent: args.includes("--save-current")
+      });
+    }
+    case "project-save":
+      return await runManagementCommand("project.save", {});
+    case "bin-create": {
+      const name = positionalArgs(args)[0];
+      if (!name) {
+        console.error('Usage: npm run resolve:bin-create -- "<name>" [--parent=<bin/path>]');
+        return 1;
+      }
+      const parentPath = optionValue(args, "parent");
+      return await runManagementCommand("media.createBin", {
+        name,
+        ...(parentPath !== undefined ? { parentPath } : {})
+      });
+    }
+    case "media-import": {
+      const filePaths = positionalArgs(args);
+      if (filePaths.length === 0) {
+        console.error("Usage: npm run resolve:media-import -- <path> [<path>...] [--bin=<bin/path>]");
+        return 1;
+      }
+      const binPath = optionValue(args, "bin");
+      return await runManagementCommand("media.import", {
+        filePaths,
+        ...(binPath !== undefined ? { binPath } : {})
+      });
+    }
     case "resolve-diagnostics": {
       const diagnostics = await prefsChannel.readDiagnostics();
       if (!diagnostics) {
@@ -226,6 +297,32 @@ async function main(): Promise<number> {
     const timeoutMs = timeoutOverride ?? settings.commandTimeoutMs;
     await bridge.enqueue(request);
 
+    console.log(`Queued ${command} as ${request.id}`);
+    console.log("ACTION REQUIRED in DaVinci Resolve:");
+    console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    console.log(`Waiting up to ${Math.round(timeoutMs / 1000)} seconds...`);
+
+    try {
+      const response = await bridge.waitForResponse(request, timeoutMs);
+      console.log(JSON.stringify(response, null, 2));
+      return response.status === "success" ? 0 : 1;
+    } catch (error) {
+      if (error instanceof BridgeTimeoutError) {
+        console.error("NO RESPONSE - manual Lua trigger still required.");
+        console.error(error.message);
+        console.error(JSON.stringify({ requestId: request.id, details: error.details }, null, 2));
+        return error.exitCode;
+      }
+      throw error;
+    }
+  }
+
+  async function runManagementCommand(
+    command: BridgeCommand,
+    payload: Record<string, unknown>
+  ): Promise<number> {
+    const timeoutMs = timeoutOverride ?? settings.commandTimeoutMs;
+    const request = await manager.enqueueOnly(command, payload, { timeoutMs });
     console.log(`Queued ${command} as ${request.id}`);
     console.log("ACTION REQUIRED in DaVinci Resolve:");
     console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");

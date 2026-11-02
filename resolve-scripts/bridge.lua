@@ -257,10 +257,25 @@ elseif command == "timeline.inspect" then
 elseif command == "render.inspect" then
   local status, result, errorInfo = runInspection(context.inspectRender)
   writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "project.create" then
+  local status, result, errorInfo = runInspection(context.createProject)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "project.open" then
+  local status, result, errorInfo = runInspection(context.openProject)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "project.save" then
+  local status, result, errorInfo = runInspection(context.saveProject)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "media.createBin" then
+  local status, result, errorInfo = runInspection(context.createBin)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "media.import" then
+  local status, result, errorInfo = runInspection(context.importMedia)
+  writeResponse(status, result, errorInfo, metaFrom(result))
 else
   prefs.setStage("unsupported-command")
   writeResponse("unsupported", nil, {
     code = "UNSUPPORTED_COMMAND",
-    message = "Command is not implemented in Milestone 2: " .. command
+    message = "Command is not implemented: " .. command
   }, nil)
 end

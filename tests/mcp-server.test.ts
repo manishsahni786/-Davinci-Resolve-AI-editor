@@ -62,7 +62,16 @@ function fakeResolve(): McpResolveService {
     inspectProject: async () => inspectionResponse("project.inspect", { projectName: "Test Project" }),
     inspectMedia: async () => inspectionResponse("media.inspect", { mediaPool: { clipCount: 0 } }),
     inspectTimeline: async () => inspectionResponse("timeline.inspect", { timelineName: "Timeline 1" }),
-    inspectRender: async () => inspectionResponse("render.inspect", { formats: { MP4: "mp4" } })
+    inspectRender: async () => inspectionResponse("render.inspect", { formats: { MP4: "mp4" } }),
+    createProject: async (payload: Record<string, unknown>) =>
+      inspectionResponse("project.create", { projectName: payload.name }),
+    openProject: async (payload: Record<string, unknown>) =>
+      inspectionResponse("project.open", { projectName: payload.name }),
+    saveProject: async () => inspectionResponse("project.save", { saved: true }),
+    createBin: async (payload: Record<string, unknown>) =>
+      inspectionResponse("media.createBin", { binPath: payload.name }),
+    importMedia: async (payload: Record<string, unknown>) =>
+      inspectionResponse("media.import", { count: (payload.filePaths as unknown[]).length })
   };
 }
 
@@ -124,6 +133,11 @@ describe("AI Video Editor MCP server", () => {
     expect(names).toContain("resolve_inspect_media");
     expect(names).toContain("resolve_inspect_timeline");
     expect(names).toContain("resolve_inspect_render");
+    expect(names).toContain("resolve_create_project");
+    expect(names).toContain("resolve_open_project");
+    expect(names).toContain("resolve_save_project");
+    expect(names).toContain("resolve_create_bin");
+    expect(names).toContain("resolve_import_media");
     expect(names).toContain("resolve_read_response");
     expect(names).toContain("resolve_clear_pending");
     expect(names).toContain("resolve_last_error");
@@ -208,5 +222,60 @@ describe("AI Video Editor MCP server", () => {
     }));
     const cleared = payload.cleared as { id: string } | null;
     expect(cleared?.id).toMatch(/^[A-Za-z0-9._-]+$/);
+  });
+
+  it("queues project and media management commands without waiting", async () => {
+    const { client, bridge } = await createHarness();
+    const create = parseText(await client.callTool({
+      name: "resolve_create_project",
+      arguments: { wait: false, name: "Milestone 4 Test" }
+    }));
+    expect(create.queued).toBe(true);
+    expect(create.command).toBe("project.create");
+    await bridge.clearPending();
+
+    const bin = parseText(await client.callTool({
+      name: "resolve_create_bin",
+      arguments: { wait: false, name: "Footage", parentPath: "B-Roll" }
+    }));
+    expect(bin.queued).toBe(true);
+    expect(bin.command).toBe("media.createBin");
+    await bridge.clearPending();
+
+    const imported = parseText(await client.callTool({
+      name: "resolve_import_media",
+      arguments: { wait: false, filePaths: ["C:/Media/a.mp4"], binPath: "B-Roll" }
+    }));
+    expect(imported.queued).toBe(true);
+    expect(imported.command).toBe("media.import");
+
+    const pending = await bridge.getPendingRequest();
+    expect(pending?.command).toBe("media.import");
+  });
+
+  it("waits for a management response when requested", async () => {
+    const { client } = await createHarness();
+    const payload = parseText(await client.callTool({
+      name: "resolve_save_project",
+      arguments: { wait: true }
+    }));
+    expect(payload.ok).toBe(true);
+    expect(payload.command).toBe("project.save");
+
+    const opened = parseText(await client.callTool({
+      name: "resolve_open_project",
+      arguments: { wait: true, name: "Test Reel", saveCurrent: true }
+    }));
+    expect(opened.ok).toBe(true);
+    expect(opened.command).toBe("project.open");
+  });
+
+  it("rejects management tool calls with invalid input", async () => {
+    const { client } = await createHarness();
+    const result = await client.callTool({
+      name: "resolve_create_project",
+      arguments: { wait: false, name: "   " }
+    });
+    expect(result.isError).toBe(true);
   });
 });

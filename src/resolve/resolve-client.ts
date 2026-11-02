@@ -82,6 +82,45 @@ export class ResolveClient {
     return response;
   }
 
+  async createProject(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("project.create", payload, { timeoutMs });
+    return response;
+  }
+
+  async openProject(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("project.open", payload, { timeoutMs });
+    return response;
+  }
+
+  async saveProject(
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("project.save", {}, { timeoutMs });
+    return response;
+  }
+
+  async createBin(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("media.createBin", payload, { timeoutMs });
+    return response;
+  }
+
+  async importMedia(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("media.import", payload, { timeoutMs });
+    return response;
+  }
+
   async status(): Promise<ResolveStatus> {
     const [environment, processInfo, portListening] = await Promise.all([
       getEnvironmentSnapshot(this.settings),

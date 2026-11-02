@@ -74,19 +74,29 @@ const CAPABILITIES: Capability[] = [
   {
     id: "resolve.project-management",
     name: "Project create/open/save/list",
-    status: "supported-untested",
-    implemented: false,
+    status: "verified",
+    implemented: true,
     milestone: "4",
-    evidence: "ProjectManager methods are present in DaVinciResolveScript.pyi for 21.1.",
-    notes: "To be verified inside the Free app during Milestone 4."
+    evidence: "Live Resolve Free 21.1.0.17: project.save b4870b9a-89dd-4296-b8a4-73157a24676f, project.create 5169f38b-f0a8-4796-b7df-c599243fe19f and project.open db857303-2ed0-41cb-8145-135884264977 (with saveCurrent) all returned ok: true.",
+    notes: "CreateProject, LoadProject and SaveProject work in the internal Lua context; OpenProject round-trips include the project list from GetProjectListInCurrentFolder."
   },
   {
-    id: "resolve.media-import",
-    name: "Media import and media pool inspection",
-    status: "supported-untested",
-    implemented: false,
+    id: "resolve.media-management",
+    name: "Media import, bins and media pool inspection",
+    status: "verified",
+    implemented: true,
     milestone: "4",
-    evidence: "MediaPool.ImportMedia and Folder.GetClipList exist in the 21.1 API definition."
+    evidence: "Live Resolve Free 21.1.0.17: media.createBin 1b52b4e0-3901-4ac5-b755-1641df01d2f5 (root) and 76224ddb-3bfb-4511-87c0-e08b53be0871 (nested Footage/Angle A), media.import c3c21b33-2e20-4b7a-a633-34b749b08d2f (1 clip, 60 fps, folder selection restored) all returned ok: true.",
+    notes: "In this 21.1 Free internal Lua context MediaPool.ImportMedia([{clipInfo}]) returned nil; the deprecated ImportMedia([paths]) form succeeded and is used as fallback. AddSubFolder with a nested parent path works. Source files are only linked, never modified."
+  },
+  {
+    id: "mock.management-commands",
+    name: "Mock adapter execution of inspection and management commands",
+    status: "verified",
+    implemented: true,
+    milestone: "4",
+    evidence: "MockResolveAdapter implements the full bridge command set with in-memory project/bin/clip state and unit tests cover success and failure paths.",
+    notes: "No Resolve required; results are simulated and never presented as live evidence."
   },
   {
     id: "resolve.timeline-editing",

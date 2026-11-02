@@ -31,6 +31,13 @@ const QUEUE_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: false
 };
 
+const MUTATION_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false
+};
+
 const TIMEOUT_DESCRIPTION = "Maximum time to wait for the manual Resolve trigger, in milliseconds.";
 const WAIT_DESCRIPTION = "When true, wait for the manual Resolve trigger and return the response. When false (default), queue the request and return its id immediately.";
 
@@ -40,6 +47,11 @@ export interface McpResolveService {
   inspectMedia(payload?: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
   inspectTimeline(payload?: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
   inspectRender(payload?: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
+  createProject(payload: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
+  openProject(payload: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
+  saveProject(timeoutMs?: number): Promise<BridgeResponseEnvelope>;
+  createBin(payload: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
+  importMedia(payload: Record<string, unknown>, timeoutMs?: number): Promise<BridgeResponseEnvelope>;
 }
 
 export interface McpServerDependencies {
@@ -272,6 +284,140 @@ export function createMcpServer(dependencies: McpServerDependencies): McpServer 
       }
       return waitForInspection(dependencies, "render.inspect", () =>
         dependencies.resolve.inspectRender(payload, args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
+      );
+    }
+  );
+
+  server.registerTool(
+    "resolve_create_project",
+    {
+      title: "Create Resolve project",
+      description: "Create and open a new Resolve project. Fails if the project already exists. By default this queues a request; set wait=true to wait for the manual Resolve trigger.",
+      inputSchema: {
+        wait: z.boolean().optional().describe(WAIT_DESCRIPTION),
+        timeoutMs: z.number().int().min(1000).max(600000).optional().describe(TIMEOUT_DESCRIPTION),
+        name: z.string().trim().min(1).max(120).describe("Project name."),
+        mediaPath: z.string().trim().min(1).max(32767).optional().describe("Optional project media location path.")
+      },
+      annotations: MUTATION_ANNOTATIONS
+    },
+    async (args) => {
+      const payload: Record<string, unknown> = { name: args.name };
+      if (args.mediaPath !== undefined) {
+        payload.mediaPath = args.mediaPath;
+      }
+      if (!hasWait(args)) {
+        return queueInspection(dependencies, "project.create", payload, args.timeoutMs);
+      }
+      return waitForInspection(dependencies, "project.create", () =>
+        dependencies.resolve.createProject(payload, args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
+      );
+    }
+  );
+
+  server.registerTool(
+    "resolve_open_project",
+    {
+      title: "Open Resolve project",
+      description: "Open an existing project from the current project folder. Unsaved changes in the current project may be lost unless saveCurrent=true. By default this queues a request; set wait=true to wait for the manual Resolve trigger.",
+      inputSchema: {
+        wait: z.boolean().optional().describe(WAIT_DESCRIPTION),
+        timeoutMs: z.number().int().min(1000).max(600000).optional().describe(TIMEOUT_DESCRIPTION),
+        name: z.string().trim().min(1).max(120).describe("Existing project name."),
+        saveCurrent: z.boolean().optional().describe("Save the current project before loading the requested one.")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const payload: Record<string, unknown> = { name: args.name };
+      if (args.saveCurrent !== undefined) {
+        payload.saveCurrent = args.saveCurrent;
+      }
+      if (!hasWait(args)) {
+        return queueInspection(dependencies, "project.open", payload, args.timeoutMs);
+      }
+      return waitForInspection(dependencies, "project.open", () =>
+        dependencies.resolve.openProject(payload, args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
+      );
+    }
+  );
+
+  server.registerTool(
+    "resolve_save_project",
+    {
+      title: "Save Resolve project",
+      description: "Save the currently open Resolve project. By default this queues a request; set wait=true to wait for the manual Resolve trigger.",
+      inputSchema: {
+        wait: z.boolean().optional().describe(WAIT_DESCRIPTION),
+        timeoutMs: z.number().int().min(1000).max(600000).optional().describe(TIMEOUT_DESCRIPTION)
+      },
+      annotations: QUEUE_ANNOTATIONS
+    },
+    async (args) => {
+      if (!hasWait(args)) {
+        return queueInspection(dependencies, "project.save", {}, args.timeoutMs);
+      }
+      return waitForInspection(dependencies, "project.save", () =>
+        dependencies.resolve.saveProject(args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
+      );
+    }
+  );
+
+  server.registerTool(
+    "resolve_create_bin",
+    {
+      title: "Create Resolve media pool bin",
+      description: "Create a bin under the media pool root or a slash-separated parent bin path. By default this queues a request; set wait=true to wait for the manual Resolve trigger.",
+      inputSchema: {
+        wait: z.boolean().optional().describe(WAIT_DESCRIPTION),
+        timeoutMs: z.number().int().min(1000).max(600000).optional().describe(TIMEOUT_DESCRIPTION),
+        name: z.string().trim().min(1).max(120).describe("New bin name."),
+        parentPath: z.string().trim().max(4096).optional().describe("Parent bin path such as Footage/Angle A. Omit for the root bin.")
+      },
+      annotations: MUTATION_ANNOTATIONS
+    },
+    async (args) => {
+      const payload: Record<string, unknown> = { name: args.name };
+      if (args.parentPath !== undefined) {
+        payload.parentPath = args.parentPath;
+      }
+      if (!hasWait(args)) {
+        return queueInspection(dependencies, "media.createBin", payload, args.timeoutMs);
+      }
+      return waitForInspection(dependencies, "media.createBin", () =>
+        dependencies.resolve.createBin(payload, args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
+      );
+    }
+  );
+
+  server.registerTool(
+    "resolve_import_media",
+    {
+      title: "Import media into Resolve",
+      description: "Import one or more media files into the current media pool bin or a specified bin. Source files are read/linked, never modified. By default this queues a request; set wait=true to wait for the manual Resolve trigger.",
+      inputSchema: {
+        wait: z.boolean().optional().describe(WAIT_DESCRIPTION),
+        timeoutMs: z.number().int().min(1000).max(600000).optional().describe(TIMEOUT_DESCRIPTION),
+        filePaths: z.array(z.string().trim().min(1).max(32767)).min(1).max(100).describe("Absolute media file or folder paths."),
+        binPath: z.string().trim().max(4096).optional().describe("Target bin path such as Footage. Omit to use the current bin.")
+      },
+      annotations: MUTATION_ANNOTATIONS
+    },
+    async (args) => {
+      const payload: Record<string, unknown> = { filePaths: args.filePaths };
+      if (args.binPath !== undefined) {
+        payload.binPath = args.binPath;
+      }
+      if (!hasWait(args)) {
+        return queueInspection(dependencies, "media.import", payload, args.timeoutMs);
+      }
+      return waitForInspection(dependencies, "media.import", () =>
+        dependencies.resolve.importMedia(payload, args.timeoutMs ?? dependencies.settings.commandTimeoutMs)
       );
     }
   );

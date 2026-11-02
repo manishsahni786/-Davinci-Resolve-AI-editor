@@ -152,6 +152,134 @@ check(optionalRenderFailure == nil and optionalRenderResult.render.formats.MP4 =
 check(#optionalRenderResult.errors == 0, "missing optional render method is not an error")
 project.GetRenderSettings = savedRenderSettings
 
+local rootChildren = { __flags = 4194304 }
+local function makeManagedFolder(name, uniqueId)
+  local folder = {
+    _children = { __flags = 4194304 },
+    GetName = function() return name end,
+    GetUniqueId = function() return uniqueId or ("folder-" .. name) end,
+    GetClipList = function() return { __flags = 4194304 } end
+  }
+  folder.GetSubFolderList = function() return folder._children end
+  return folder
+end
+
+local managedRoot = makeManagedFolder("Master", "root-folder")
+managedRoot._children = rootChildren
+local managedPool
+local managedCurrentFolder = managedRoot
+local managedSaves = 0
+local importCount = 0
+managedPool = {
+  GetRootFolder = function() return managedRoot end,
+  GetCurrentFolder = function() return managedCurrentFolder end,
+  SetCurrentFolder = function(_, folder)
+    managedCurrentFolder = folder
+    return true
+  end,
+  AddSubFolder = function(_, parent, name)
+    local folder = makeManagedFolder(name)
+    parent._children[#parent._children + 1] = folder
+    return folder
+  end,
+  ImportMedia = function(_, clipInfos)
+    local items = { __flags = 4194304 }
+    for _, info in ipairs(clipInfos) do
+      importCount = importCount + 1
+      items[#items + 1] = {
+        GetName = function() return "imported-" .. tostring(importCount) .. ".wav" end,
+        GetUniqueId = function() return "imported-id-" .. tostring(importCount) end,
+        GetMediaId = function() return "imported-media-" .. tostring(importCount) end,
+        GetClipProperty = function(_, key)
+          if key == "File Path" then return info.FilePath end
+          if key == "Type" then return "Audio" end
+          return nil
+        end
+      }
+    end
+    return items
+  end
+}
+
+local managedProjects = { "Fake Project" }
+local function makeManagedProject(name)
+  return {
+    GetName = function() return name end,
+    GetUniqueId = function() return "project-" .. name end,
+    GetTimelineCount = function() return 0 end,
+    GetMediaPool = function() return managedPool end
+  }
+end
+local managedCurrentProject = makeManagedProject("Fake Project")
+
+local managedManager = {
+  GetCurrentProject = function() return managedCurrentProject end,
+  GetProjectListInCurrentFolder = function() return managedProjects end,
+  GetCurrentFolder = function() return "" end,
+  CreateProject = function(_, name)
+    for _, existing in ipairs(managedProjects) do
+      if existing == name then return nil end
+    end
+    managedProjects[#managedProjects + 1] = name
+    managedCurrentProject = makeManagedProject(name)
+    return managedCurrentProject
+  end,
+  LoadProject = function(_, name)
+    for _, existing in ipairs(managedProjects) do
+      if existing == name then
+        managedCurrentProject = makeManagedProject(name)
+        return managedCurrentProject
+      end
+    end
+    return nil
+  end,
+  SaveProject = function()
+    managedSaves = managedSaves + 1
+    return true
+  end
+}
+resolve = {
+  GetVersionString = function() return "21.1.0.17" end,
+  IsStudio = function() return false end,
+  GetCurrentPage = function() return "media" end,
+  GetProjectManager = function() return managedManager end
+}
+context.setResolve(resolve)
+
+local createdProject, createFailure = context.createProject({ name = "New Project" })
+check(createFailure == nil and createdProject.project.name == "New Project", "create project")
+local duplicateProject, duplicateFailure = context.createProject({ name = "New Project" })
+check(duplicateProject ~= nil and duplicateFailure.code == "PROJECT_ALREADY_EXISTS", "duplicate project rejected")
+
+local openedProject, openFailure = context.openProject({ name = "Fake Project", saveCurrent = true })
+check(openFailure == nil and openedProject.project.name == "Fake Project", "open project")
+check(openedProject.savedCurrent == true and managedSaves == 1, "save current before open")
+local missingProject, missingFailure = context.openProject({ name = "Missing Project" })
+check(missingProject ~= nil and missingFailure.code == "PROJECT_NOT_FOUND", "missing project rejected")
+
+local savedProject, saveFailure = context.saveProject()
+check(saveFailure == nil and savedProject.saved == true and managedSaves == 2, "save project")
+
+local footageBin, footageFailure = context.createBin({ name = "Footage" })
+check(footageFailure == nil and footageBin.bin.path == "Footage", "create root bin")
+local angleBin, angleFailure = context.createBin({ name = "Angle A", parentPath = "Footage" })
+check(angleFailure == nil and angleBin.bin.path == "Footage/Angle A", "create nested bin")
+local duplicateBin, duplicateBinFailure = context.createBin({ name = "Footage" })
+check(duplicateBin ~= nil and duplicateBinFailure.code == "BIN_ALREADY_EXISTS", "duplicate bin rejected")
+
+local imported, importFailure = context.importMedia({
+  filePaths = { "C:\\media\\tone.wav" },
+  binPath = "Footage/Angle A"
+})
+check(importFailure == nil and imported.imported.count == 1, "import media into bin")
+check(imported.imported.currentFolderRestored == true, "restore current folder after import")
+check(imported.imported.clips[1].filePath == "C:\\media\\tone.wav", "imported clip summary")
+local missingBin, missingBinFailure = context.importMedia({
+  filePaths = { "C:\\media\\tone.wav" },
+  binPath = "Missing/Bin"
+})
+check(missingBin ~= nil and missingBinFailure.code == "BIN_NOT_FOUND", "missing import bin rejected")
+
 local prefs = dofile(root .. "\\lib\\prefs.lua")
 local store = {}
 local fakeFusion = {}

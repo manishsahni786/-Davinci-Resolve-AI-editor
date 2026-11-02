@@ -1,8 +1,8 @@
 # MCP Setup
 
-The project now exposes a local **Model Context Protocol** server over stdio. It provides read-only Resolve status and inspection tools to OpenCode or any other MCP client.
+The project now exposes a local **Model Context Protocol** server over stdio. It provides Resolve status and inspection tools plus project/media management tools to OpenCode or any other MCP client.
 
-The server does not bypass the bridge: every Resolve inspection still requires the manual Scripts-menu trigger because DaVinci Resolve Free does not allow external scripting.
+The server does not bypass the bridge: every Resolve request still requires the manual Scripts-menu trigger because DaVinci Resolve Free does not allow external scripting.
 
 ## 1. Build
 
@@ -58,11 +58,16 @@ The server also writes its logs to the normal project log directory, so stdout r
 | `resolve_inspect_media` | Media-pool bins and clips |
 | `resolve_inspect_timeline` | Timeline, tracks, items and markers |
 | `resolve_inspect_render` | Render formats, codecs, presets and current format/codec |
+| `resolve_create_project` | Create and open a new project |
+| `resolve_open_project` | Open an existing project (optionally saving the current one) |
+| `resolve_save_project` | Save the current project |
+| `resolve_create_bin` | Create a media-pool bin |
+| `resolve_import_media` | Import media files into the current or a target bin |
 | `resolve_read_response` | Read the response for a queued request id |
 | `resolve_clear_pending` | Archive an unprocessed request |
 | `resolve_last_error` | Last early bridge error and stage from Fusion prefs |
 
-All inspection tools are read-only with respect to the Resolve project. They do not cut, trim, move, delete, import, or render anything.
+The inspection tools are read-only with respect to the Resolve project. The five Milestone 4 management tools modify the project (project list, media pool bins, media links) but never modify or delete source media files. The management commands are verified live in Resolve Free 21.1.0.17 (project create/open/save, bins, media import), and the mock adapter covers them for offline tests.
 
 ## 4. Queue and read workflow
 
@@ -120,9 +125,32 @@ Render inspection:
 }
 ```
 
+Milestone 4 management examples:
+
+```json
+{
+  "name": "resolve_create_bin",
+  "arguments": { "wait": false, "name": "Angle A", "parentPath": "Footage" }
+}
+```
+
+```json
+{
+  "name": "resolve_import_media",
+  "arguments": { "wait": false, "filePaths": ["C:\\Media\\clip1.mp4"], "binPath": "Footage/Angle A" }
+}
+```
+
+```json
+{
+  "name": "resolve_open_project",
+  "arguments": { "wait": true, "name": "Dying_Light_8", "saveCurrent": true }
+}
+```
+
 ## 6. Verification
 
-Automated tests cover the MCP handshake, tool discovery, queueing, response reading, waiting, and clearing:
+Automated tests cover the MCP handshake, tool discovery, queueing, response reading, waiting, clearing, and the Milestone 4 management tools (queueing, waiting, input rejection, and full management flows over the mock adapter):
 
 ```powershell
 npm test
@@ -130,7 +158,7 @@ npm run typecheck
 npm run build
 ```
 
-Current MCP server tools: **9**. The tests use the official MCP SDK over an in-memory transport, and the stdio server has also been smoke-tested with a real SDK client process.
+Current MCP server tools: **14**. The tests use the official MCP SDK over an in-memory transport, and the stdio server has also been smoke-tested with a real SDK client process.
 
 ## 7. Troubleshooting
 

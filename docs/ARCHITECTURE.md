@@ -55,7 +55,7 @@ Node.js media tools (later milestone)
 
 Responsibilities:
 
-- MCP server and OpenCode integration (Milestone 3).
+- MCP server and OpenCode integration (Milestones 3-4).
 - Tool input validation with Zod.
 - Editing-command orchestration and serialization.
 - Capability checks before commands are queued.
@@ -77,6 +77,8 @@ Current implementation:
 - `src/mcp-server.ts` MCP stdio entry point
 - `src/index.ts` CLI
 
+The mock adapter implements the full current command set (inspection and management) with in-memory project/bin/clip state, so unit tests never require Resolve.
+
 ### Lua inside Resolve
 
 Responsibilities:
@@ -93,9 +95,9 @@ Current implementation:
 - `resolve-scripts/diagnostics.lua` â€” standalone diagnostic report.
 - `resolve-scripts/lib/json.lua` â€” dependency-free JSON.
 - `resolve-scripts/lib/paths.lua` â€” config, atomic writes, logging.
-- `resolve-scripts/lib/resolve-context.lua` â€” read-only Resolve inspection and safe calls.
+- `resolve-scripts/lib/resolve-context.lua` â€” inspection plus Milestone 4 management commands (`project.create`, `project.open`, `project.save`, `media.createBin`, `media.import`, all implemented in `bridge.lua`).
 
-The Lua side deliberately implements **no editing commands** in Milestones 1-2. The bridge response channel is in `resolve-scripts/lib/prefs.lua`.
+The Lua side deliberately implements **no timeline editing** yet; timeline editing is Milestone 5. The bridge response channel is in `resolve-scripts/lib/prefs.lua`.
 
 ### Python worker
 
@@ -284,7 +286,7 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 | 1 | Diagnostics, Resolve connection, Fusion prefs bridge | Verified live (`resolveConnected: true`) |
 | 2 | Lua bridge command expansion and transport hardening | Verified live (project, media, timeline and render inspection) |
 | 3 | MCP server and basic Resolve tools | Verified over stdio (9 read-only tools) |
-| 4 | Project and media management | Not started |
+| 4 | Project and media management | Verified live (project create/open/save, bins, media import) |
 | 5 | Timeline inspection and editing | Not started |
 | 6 | Rendering and export | Not started |
 | 7 | Python media analysis | Not started |
@@ -294,11 +296,12 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 
 ## 10. MCP mapping
 
-The MCP server (`dist/mcp-server.js`) exposes nine read-only tools: `resolve_status`, `resolve_capabilities`, four inspection tools, `resolve_read_response`, `resolve_clear_pending`, and `resolve_last_error`. Inspection tools queue by default because each queued request needs the manual Bridge trigger; `wait: true` blocks instead.
+The MCP server (`dist/mcp-server.js`) exposes fourteen tools: `resolve_status`, `resolve_capabilities`, four inspection tools (`resolve_inspect_project`, `resolve_inspect_media`, `resolve_inspect_timeline`, `resolve_inspect_render`), five management tools (`resolve_create_project`, `resolve_open_project`, `resolve_save_project`, `resolve_create_bin`, `resolve_import_media`), and `resolve_read_response`, `resolve_clear_pending`, `resolve_last_error`. Inspection and management tools queue by default because each queued request needs the manual Bridge trigger; `wait: true` blocks instead.
 
 For each tool:
 
-- input schema is validated in Node;
+- input schema is validated in Node with Zod;
+- the command payload is re-validated against the protocol schema before queueing;
 - capability status is checked;
 - destructive actions require confirmation;
 - the tool returns the structured request/response result;

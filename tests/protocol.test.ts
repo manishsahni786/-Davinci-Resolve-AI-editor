@@ -86,6 +86,30 @@ describe("bridge message protocol", () => {
     expect(() => validateCommandPayload("media.inspect", { unexpected: true })).toThrow();
   });
 
+  it("knows the Milestone 4 management command set", () => {
+    expect(isKnownBridgeCommand("project.create")).toBe(true);
+    expect(isKnownBridgeCommand("project.open")).toBe(true);
+    expect(isKnownBridgeCommand("project.save")).toBe(true);
+    expect(isKnownBridgeCommand("media.createBin")).toBe(true);
+    expect(isKnownBridgeCommand("media.import")).toBe(true);
+    expect(isKnownBridgeCommand("timeline.deleteClip")).toBe(false);
+  });
+
+  it("validates management payloads", () => {
+    expect(validateCommandPayload("project.create", { name: "Reel A" })).toEqual({ name: "Reel A" });
+    expect(validateCommandPayload("media.createBin", {
+      name: "Clips",
+      parentPath: "Footage/Angle B"
+    })).toEqual({ name: "Clips", parentPath: "Footage/Angle B" });
+
+    expect(() => validateCommandPayload("project.create", { name: "bad/name" })).toThrow();
+    expect(() => validateCommandPayload("project.open", {})).toThrow();
+    expect(() => validateCommandPayload("project.save", { anything: true })).toThrow();
+    expect(() => validateCommandPayload("media.createBin", { name: "ok", parentPath: "../escape" })).toThrow();
+    expect(() => validateCommandPayload("media.import", { filePaths: [] })).toThrow();
+    expect(() => validateCommandPayload("media.import", { filePaths: ["C:/a.mp4"], binPath: "../escape" })).toThrow();
+  });
+
   it("builds a safe response filename", () => {
     expect(responseFileName("abc-123")).toBe("abc-123.response.json");
   });

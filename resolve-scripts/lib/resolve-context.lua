@@ -405,6 +405,150 @@ local function baseResult(session)
   }
 end
 
+local function createManagerSession()
+  local session = {
+    connected = false,
+    errors = emptyArray()
+  }
+  local resolveObject, source = context.getResolve()
+  session.source = source
+  if resolveObject == nil then
+    session.errors[#session.errors + 1] = source
+    session.failure = {
+      code = "RESOLVE_UNAVAILABLE",
+      message = "The internal Resolve object is unavailable."
+    }
+    return session
+  end
+
+  session.resolve = resolveObject
+  session.version = recordCall(session, resolveObject, "GetVersionString")
+  session.isStudio = recordCall(session, resolveObject, "IsStudio")
+  session.manager = recordCall(session, resolveObject, "GetProjectManager")
+  if session.manager == nil then
+    session.failure = {
+      code = "PROJECT_MANAGER_UNAVAILABLE",
+      message = "Could not obtain the Resolve ProjectManager."
+    }
+    return session
+  end
+
+  session.connected = true
+  session.project = recordCall(session, session.manager, "GetCurrentProject")
+  if session.project ~= nil then
+    session.projectName = recordCall(session, session.project, "GetName")
+  end
+  return session
+end
+
+local function trimmed(value)
+  if type(value) ~= "string" then
+    return nil
+  end
+  return value:match("^%s*(.-)%s*$")
+end
+
+local function validName(value)
+  local name = trimmed(value)
+  if name == nil or name == "" or #name > 120 then
+    return nil
+  end
+  if name == "." or name == ".." or name:find('[<>:"/\\|%?%*]') ~= nil then
+    return nil
+  end
+  return name
+end
+
+local function validBinPath(value)
+  if value == nil then
+    return ""
+  end
+  local path = trimmed(value)
+  if path == nil or path == "" then
+    return ""
+  end
+  local segments = 0
+  for segment in path:gmatch("[^/]+") do
+    if validName(segment) == nil then
+      return nil
+    end
+    segments = segments + 1
+  end
+  if segments == 0 or segments > 32 or path:sub(1, 1) == "/" or path:sub(-1) == "/" then
+    return nil
+  end
+  return path
+end
+
+local function joinBinPath(parentPath, name)
+  if parentPath == nil or parentPath == "" then
+    return name
+  end
+  return parentPath .. "/" .. name
+end
+
+local function projectNames(session)
+  return arrayItems(recordCall(session, session.manager, "GetProjectListInCurrentFolder"))
+end
+
+local function containsProject(session, name)
+  for _, item in ipairs(projectNames(session)) do
+    if item == name then
+      return true
+    end
+  end
+  return false
+end
+
+local function projectSummary(project, session)
+  return {
+    name = recordCall(session, project, "GetName"),
+    uniqueId = recordCall(session, project, "GetUniqueId"),
+    timelineCount = recordCall(session, project, "GetTimelineCount"),
+    currentPage = recordCall(session, session.resolve, "GetCurrentPage")
+  }
+end
+
+local function findFolder(mediaPool, path, session)
+  local current = recordCall(session, mediaPool, "GetRootFolder")
+  if current == nil then
+    return nil, {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the media pool root folder."
+    }
+  end
+  if path == nil or path == "" then
+    return current, nil
+  end
+
+  for segment in path:gmatch("[^/]+") do
+    local nextFolder = nil
+    local subfolders = arrayItems(recordCall(session, current, "GetSubFolderList"))
+    for _, subfolder in ipairs(subfolders) do
+      if recordCall(session, subfolder, "GetName") == segment then
+        nextFolder = subfolder
+        break
+      end
+    end
+    if nextFolder == nil then
+      return nil, {
+        code = "BIN_NOT_FOUND",
+        message = "Media pool bin not found: " .. path
+      }
+    end
+    current = nextFolder
+  end
+  return current, nil
+end
+
+local function folderSummary(folder, path, session)
+  return {
+    name = recordCall(session, folder, "GetName"),
+    uniqueId = recordCall(session, folder, "GetUniqueId"),
+    path = path
+  }
+end
+
 local function stringMap(value)
   local result = {}
   if type(value) ~= "table" then
@@ -769,6 +913,340 @@ function context.inspectRender(options)
     result.render.jobs = jobList
   end
 
+  return result, nil
+end
+
+function context.createProject(options)
+  options = options or {}
+  local session = createManagerSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local name = validName(options.name)
+  if name == nil then
+    result.failure = {
+      code = "INVALID_PROJECT_NAME",
+      message = "Project name is empty or contains unsupported characters."
+    }
+    return result, result.failure
+  end
+  if containsProject(session, name) then
+    result.failure = {
+      code = "PROJECT_ALREADY_EXISTS",
+      message = "A project with this name already exists: " .. name
+    }
+    return result, result.failure
+  end
+
+  local project
+  local mediaPath = trimmed(options.mediaPath)
+  if mediaPath ~= nil and mediaPath ~= "" then
+    project = recordCall(session, session.manager, "CreateProject", name, mediaPath)
+  else
+    project = recordCall(session, session.manager, "CreateProject", name)
+  end
+  if project == nil then
+    result.failure = {
+      code = "PROJECT_CREATE_FAILED",
+      message = "Resolve did not create the project: " .. name
+    }
+    return result, result.failure
+  end
+
+  result.project = projectSummary(project, session)
+  result.projectName = result.project.name
+  result.projectManager = {
+    currentFolder = recordCall(session, session.manager, "GetCurrentFolder"),
+    projects = projectNames(session)
+  }
+  return result, nil
+end
+
+function context.openProject(options)
+  options = options or {}
+  local session = createManagerSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local name = validName(options.name)
+  if name == nil then
+    result.failure = {
+      code = "INVALID_PROJECT_NAME",
+      message = "Project name is empty or contains unsupported characters."
+    }
+    return result, result.failure
+  end
+  if not containsProject(session, name) then
+    result.failure = {
+      code = "PROJECT_NOT_FOUND",
+      message = "Project not found in the current folder: " .. name
+    }
+    return result, result.failure
+  end
+
+  local savedCurrent = false
+  if options.saveCurrent == true and session.project ~= nil then
+    savedCurrent = recordCall(session, session.manager, "SaveProject") == true
+  end
+
+  local project = recordCall(session, session.manager, "LoadProject", name)
+  if project == nil then
+    result.failure = {
+      code = "PROJECT_OPEN_FAILED",
+      message = "Resolve did not open the project: " .. name
+    }
+    return result, result.failure
+  end
+
+  result.project = projectSummary(project, session)
+  result.projectName = result.project.name
+  result.savedCurrent = savedCurrent
+  result.projectManager = {
+    currentFolder = recordCall(session, session.manager, "GetCurrentFolder"),
+    projects = projectNames(session)
+  }
+  return result, nil
+end
+
+function context.saveProject()
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local saved = recordCall(session, session.manager, "SaveProject")
+  if saved ~= true then
+    result.failure = {
+      code = "PROJECT_SAVE_FAILED",
+      message = "Resolve did not save the current project: " .. tostring(session.projectName)
+    }
+    return result, result.failure
+  end
+
+  result.saved = true
+  result.project = projectSummary(session.project, session)
+  return result, nil
+end
+
+function context.createBin(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local name = validName(options.name)
+  if name == nil then
+    result.failure = {
+      code = "INVALID_BIN_NAME",
+      message = "Bin name is empty or contains unsupported characters."
+    }
+    return result, result.failure
+  end
+  local parentPath = validBinPath(options.parentPath)
+  if parentPath == nil then
+    result.failure = {
+      code = "INVALID_BIN_PATH",
+      message = "Parent bin path is invalid."
+    }
+    return result, result.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local parent, folderFailure = findFolder(mediaPool, parentPath, session)
+  if parent == nil then
+    result.failure = folderFailure
+    return result, result.failure
+  end
+
+  for _, subfolder in ipairs(arrayItems(recordCall(session, parent, "GetSubFolderList"))) do
+    if recordCall(session, subfolder, "GetName") == name then
+      result.failure = {
+        code = "BIN_ALREADY_EXISTS",
+        message = "A bin with this name already exists: " .. joinBinPath(parentPath, name)
+      }
+      return result, result.failure
+    end
+  end
+
+  local folder = recordCall(session, mediaPool, "AddSubFolder", parent, name)
+  if folder == nil then
+    result.failure = {
+      code = "BIN_CREATE_FAILED",
+      message = "Resolve did not create the media pool bin: " .. name
+    }
+    return result, result.failure
+  end
+
+  local binPath = joinBinPath(parentPath, name)
+  result.bin = folderSummary(folder, binPath, session)
+  result.binPath = binPath
+  return result, nil
+end
+
+function context.importMedia(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local filePaths = options.filePaths
+  if type(filePaths) ~= "table" or #filePaths == 0 then
+    result.failure = {
+      code = "INVALID_MEDIA_PATHS",
+      message = "At least one media file path is required."
+    }
+    return result, result.failure
+  end
+  if #filePaths > 100 then
+    result.failure = {
+      code = "TOO_MANY_MEDIA_PATHS",
+      message = "At most 100 media paths can be imported per request."
+    }
+    return result, result.failure
+  end
+
+  local clipInfos = {}
+  for index, filePath in ipairs(filePaths) do
+    local path = trimmed(filePath)
+    if path == nil or path == "" then
+      result.failure = {
+        code = "INVALID_MEDIA_PATH",
+        message = "Media path at index " .. tostring(index) .. " is invalid."
+      }
+      return result, result.failure
+    end
+    clipInfos[index] = { FilePath = path }
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local targetPath = nil
+  if options.binPath ~= nil then
+    targetPath = validBinPath(options.binPath)
+    if targetPath == nil then
+      result.failure = {
+        code = "INVALID_BIN_PATH",
+        message = "Target bin path is invalid."
+      }
+      return result, result.failure
+    end
+  end
+
+  local targetFolder = nil
+  if targetPath ~= nil then
+    local folderFailure
+    targetFolder, folderFailure = findFolder(mediaPool, targetPath, session)
+    if targetFolder == nil then
+      result.failure = folderFailure
+      return result, result.failure
+    end
+  end
+
+  local originalFolder = recordCall(session, mediaPool, "GetCurrentFolder")
+  if targetFolder ~= nil then
+    if recordCall(session, mediaPool, "SetCurrentFolder", targetFolder) ~= true then
+      result.failure = {
+        code = "BIN_SELECT_FAILED",
+        message = "Could not select the target media pool bin: " .. targetPath
+      }
+      return result, result.failure
+    end
+  end
+
+  -- 21.1 changed import calling conventions. Try the documented dict form first,
+  -- then ProjectManager.AddItemListToMediaPool (MediaStorageItemInfo dicts),
+  -- then the deprecated plain-path array form. Record which attempt succeeded.
+  local mediaItems = {}
+  local plainPaths = {}
+  for index, filePath in ipairs(filePaths) do
+    mediaItems[index] = { media = filePath }
+    plainPaths[index] = filePath
+  end
+
+  local attempts = emptyArray()
+  local imported = recordCall(session, mediaPool, "ImportMedia", clipInfos)
+  if imported ~= nil then
+    attempts[#attempts + 1] = "MediaPool.ImportMedia(clipInfo)"
+  else
+    local projectManager = session.manager
+    if projectManager ~= nil then
+      imported = optionalCall(session, projectManager, "AddItemListToMediaPool", mediaItems)
+      if imported ~= nil then
+        attempts[#attempts + 1] = "ProjectManager.AddItemListToMediaPool"
+      end
+    end
+    if imported == nil then
+      imported = recordCall(session, mediaPool, "ImportMedia", plainPaths)
+      if imported ~= nil then
+        attempts[#attempts + 1] = "MediaPool.ImportMedia(paths)"
+      end
+    end
+  end
+
+  local restored = false
+  if targetFolder ~= nil and originalFolder ~= nil then
+    restored = recordCall(session, mediaPool, "SetCurrentFolder", originalFolder) == true
+  end
+
+  if imported == nil then
+    result.failure = {
+      code = "MEDIA_IMPORT_FAILED",
+      message = "Resolve did not import the requested media.",
+      details = { attempts = attempts }
+    }
+    return result, result.failure
+  end
+
+  local items = arrayItems(imported)
+  if #items == 0 then
+    result.failure = {
+      code = "NO_MEDIA_IMPORTED",
+      message = "The import call returned no media pool items."
+    }
+    return result, result.failure
+  end
+
+  local clips = emptyArray()
+  for index = 1, #items do
+    clips[#clips + 1] = clipSummary(items[index], session)
+  end
+
+  result.imported = {
+    count = #clips,
+    clips = clips,
+    binPath = targetPath,
+    method = attempts[1],
+    currentFolderRestored = restored
+  }
   return result, nil
 end
 
