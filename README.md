@@ -2,7 +2,7 @@
 
 An AI-assisted video editing system for **DaVinci Resolve 21.1 Free** on Windows, designed to be driven from **OpenCode** through a local MCP server.
 
-This repository is currently at **Milestone 2**, verified live: environment diagnostics, a working manual Resolve bridge using file requests and Fusion-preference responses, and read-only project, media-pool, timeline and render inspection. Editing tools, MCP tools and media analysis arrive in later milestones.
+This repository is currently at **Milestone 3**, verified live: environment diagnostics, a working manual Resolve bridge using file requests and Fusion-preference responses, read-only project, media-pool, timeline and render inspection, and a local MCP server exposing those tools to OpenCode. Editing and media analysis arrive in later milestones.
 
 ## The important constraint
 
@@ -15,7 +15,7 @@ DaVinci Resolve **Free** does not allow external scripting. This was verified on
 Therefore Node cannot call Resolve directly. The bridge works like this:
 
 ```
-OpenCode (future)
+OpenCode
     -> Node.js / TypeScript MCP server
     -> atomic JSON + Lua request files
     -> manually triggered Resolve Lua script
@@ -33,10 +33,13 @@ Resolve Free also sandboxes internal Lua: `io` is unavailable, so the Lua side c
 ```powershell
 # From the project root
 npm install
+npm run build
 npm run resolve:install-scripts
 npm run status
 npm run resolve:test
 ```
+
+`npm run build` creates `dist\mcp-server.js`, which `opencode.json` launches. Restart OpenCode after installing or updating the MCP server.
 
 When `resolve:test` prints the action prompt, switch to Resolve and run:
 
@@ -70,6 +73,7 @@ npm run resolve:clear
 | `npm run resolve:clear` | Archive a pending request |
 | `npm run resolve:install-scripts` | Install/update the Resolve Lua scripts |
 | `npm run resolve:mock` | Run a mock Resolve adapter without Resolve |
+| `npm run mcp` | Run the MCP server over stdio for development |
 | `npm run lua:test` | Run the Lua JSON/protocol tests with `fuscript` |
 | `npm run python:check` | Inspect the Python media-analysis environment |
 | `npm run python:test` | Run Python worker protocol tests |
@@ -77,7 +81,7 @@ npm run resolve:clear
 | `npm run typecheck` | TypeScript strict type check |
 | `npm run build` | Compile to `dist/` |
 
-## What is implemented in Milestones 1-2
+## What is implemented in Milestones 1-3
 
 - Environment detection (Node, Python, Git, Resolve process/install, script folders, FFmpeg).
 - Resolve install/version/API discovery.
@@ -107,14 +111,19 @@ npm run resolve:clear
   - stale response recovery and request archiving,
   - short prefs-flush retry when reading a late response,
   - optional Resolve APIs omitted without being reported as errors.
+- Local MCP server over stdio, registered in `opencode.json`:
+  - `resolve_status`,
+  - `resolve_capabilities`,
+  - `resolve_inspect_project`, `resolve_inspect_media`, `resolve_inspect_timeline`, `resolve_inspect_render`,
+  - `resolve_read_response`, `resolve_clear_pending`, `resolve_last_error`.
+- MCP inspection tools queue by default and return a request id; `wait: true` blocks until the manual Resolve trigger. No editing tools are exposed.
 - Mock Resolve adapter so tests do not need Resolve open.
 - Python worker skeleton (`ping`, `env_info`, `shutdown`) with JSON-lines IPC and tests.
 - Installer that writes menu launchers directly under `Utility`, stores the implementation in a subfolder, backs up existing bridge scripts outside the Resolve scan path, and preserves `resolve_test.lua`.
-- TypeScript (28), Lua (38) and Python (5) test suites.
+- TypeScript (35), Lua (38) and Python (5) test suites.
 
 ## What is not implemented yet
 
-- MCP server and OpenCode tools (Milestone 3).
 - Project/media/timeline editing commands (Milestones 4-5).
 - Rendering (Milestone 6).
 - FFmpeg/OpenCV/Whisper/PySceneDetect media analysis (Milestone 7).
@@ -126,6 +135,8 @@ No editing tool claims to work before it has been verified inside Resolve Free.
 
 ```
 src/
+  mcp/          MCP tool registration
+  mcp-server.ts MCP stdio entry point
   bridge/       file bridge, protocol, serial command manager
   config/       settings and Windows environment detection
   resolve/      Resolve client, capability matrix, mock adapter
@@ -156,11 +167,12 @@ config/                 settings example
 - [Environment diagnostics](docs/ENVIRONMENT_DIAGNOSTICS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Resolve setup and bridge usage](docs/RESOLVE_SETUP.md)
+- [MCP setup and tools](docs/MCP_SETUP.md)
 
 ## Safety rules
 
 - Source media is never modified or deleted.
 - Commands are not executed from natural language without capability validation and confirmation.
 - Arbitrary shell commands are never generated from user instructions.
-- The Lua scripts only implement read-only diagnostics and inspection in these milestones.
+- The Lua scripts and MCP tools only implement read-only diagnostics and inspection in these milestones.
 - A missing or failed Resolve response is reported as a timeout/failure, never as success.

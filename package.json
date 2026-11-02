@@ -26,6 +26,7 @@
     "resolve:clear": "tsx src/index.ts clear",
     "resolve:install-scripts": "powershell -NoProfile -ExecutionPolicy Bypass -File resolve-scripts/install.ps1",
     "resolve:mock": "tsx src/index.ts mock",
+    "mcp": "tsx src/mcp-server.ts",
     "lua:test": "powershell -NoProfile -ExecutionPolicy Bypass -File resolve-scripts/test.ps1",
     "python:check": "python python/check_environment.py",
     "python:worker": "python python/worker.py",
@@ -36,6 +37,7 @@
     "check": "npm run typecheck && npm run test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {

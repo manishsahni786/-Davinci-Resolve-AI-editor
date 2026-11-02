@@ -23,6 +23,12 @@ describe("resolve capability matrix", () => {
     expect(capability?.implemented).toBe(true);
   });
 
+  it("records the MCP stdio server as verified", () => {
+    const capability = getCapability("mcp.server");
+    expect(capability?.status).toBe("verified");
+    expect(capability?.implemented).toBe(true);
+  });
+
   it("marks background polling as unsupported instead of pretending it works", () => {
     const capability = getCapability("bridge.background-polling");
     expect(capability?.status).toBe("unsupported");

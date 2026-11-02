@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ai-video-editor": {
+      "type": "local",
+      "command": ["node", "dist/mcp-server.js"],
+      "enabled": true,
+      "environment": {
+        "AVE_LOG_LEVEL": "info"
+      }
+    }
+  }
+}

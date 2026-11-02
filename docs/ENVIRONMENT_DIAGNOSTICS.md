@@ -3,7 +3,7 @@
 Date: 2026-10-30  
 Updated: 2026-11-02
 Project: AI Video Editor (OpenCode + DaVinci Resolve Free 21.1)
-Milestones: 1-2 - environment inspection, bridge, and verified read-only inspection
+Milestones: 1-3 - environment inspection, bridge, read-only inspection, and MCP server
 
 This report separates measured facts from assumptions. Anything not yet exercised inside Resolve is marked **supported but not yet tested**, not "working".
 
@@ -193,10 +193,11 @@ Verified by automated tests and by manual menu invocation inside the running Res
 | --- | --- |
 | Workspace > Scripts menu Lua execution | Verified by manual Bridge invocation |
 | Internal Resolve object | `resolveConnected: true`, version `21.1.0.17` |
-| Node/TypeScript project toolchain | typecheck + 28 unit tests passed |
+| Node/TypeScript project toolchain | typecheck + 35 unit tests passed |
 | File bridge mechanics | Unit tests, prefs test, and mock adapter |
 | Fusion prefs response channel | Live Resolve round-trip + unit test |
 | Read-only inspection commands | Live `project.inspect`, `media.inspect`, `timeline.inspect` and `render.inspect` all returned `ok: true` |
+| MCP stdio server | Real SDK client handshake listed 9 tools; MCP queue, read, wait and clear tests pass |
 | Lua JSON and protocol | 38 Lua tests passed |
 | Python stdlib worker protocol | 5 Python tests passed |
 | Internal script installation without overwriting old scripts | Installer backup + separate folder |
@@ -300,3 +301,10 @@ Milestone 1 is complete when all of the following are true:
 - [x] Transport idempotency, early error/stage reporting, and stale response recovery.
 - [x] All four inspection commands verified live in Resolve Free `21.1.0.17`.
 - [x] TypeScript, Lua and Python tests pass.
+
+## 11. Milestone 3 exit criteria
+
+- [x] MCP stdio server implemented and registered in `opencode.json`.
+- [x] Nine read-only tools for status, capabilities, inspection, response reading, clearing and errors.
+- [x] Queue-by-default workflow avoids MCP timeouts while waiting for a manual Bridge click.
+- [x] SDK stdio handshake and MCP tests pass.

@@ -46,6 +46,15 @@ const CAPABILITIES: Capability[] = [
     notes: "Timeline inspection returned TIMELINE_UNAVAILABLE when no timeline was open, then succeeded after a timeline was created. Project.GetRenderSettings is absent from this Free internal context; render settings are optional and omission is not treated as an error."
   },
   {
+    id: "mcp.server",
+    name: "MCP stdio server with read-only Resolve tools",
+    status: "verified",
+    implemented: true,
+    milestone: "3",
+    evidence: "A real MCP SDK client completed a stdio handshake with dist/mcp-server.js and listed 9 tools; 6 MCP tests cover discovery, capability output, queueing, waiting, response reading and clearing.",
+    notes: "Inspection tools queue by default because every Resolve request still needs the manual Bridge menu trigger. No editing tools are exposed in Milestone 3."
+  },
+  {
     id: "bridge.background-polling",
     name: "Continuous background command polling inside Resolve",
     status: "unsupported",

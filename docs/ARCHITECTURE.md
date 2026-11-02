@@ -73,6 +73,8 @@ Current implementation:
 - `src/resolve/resolve-capabilities.ts`
 - `src/resolve/resolve-client.ts`
 - `src/resolve/mock-resolve-adapter.ts`
+- `src/mcp/server.ts` MCP tool registration
+- `src/mcp-server.ts` MCP stdio entry point
 - `src/index.ts` CLI
 
 ### Lua inside Resolve
@@ -281,7 +283,7 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 | --- | --- | --- |
 | 1 | Diagnostics, Resolve connection, Fusion prefs bridge | Verified live (`resolveConnected: true`) |
 | 2 | Lua bridge command expansion and transport hardening | Verified live (project, media, timeline and render inspection) |
-| 3 | MCP server and basic Resolve tools | Not started |
+| 3 | MCP server and basic Resolve tools | Verified over stdio (9 read-only tools) |
 | 4 | Project and media management | Not started |
 | 5 | Timeline inspection and editing | Not started |
 | 6 | Rendering and export | Not started |
@@ -290,9 +292,11 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 | 9 | Instagram Reel workflow | Not started |
 | 10 | Full test suite, docs, integration | Not started |
 
-## 10. MCP mapping (future)
+## 10. MCP mapping
 
-The future MCP server will expose only capabilities that can be implemented through this bridge. For each tool:
+The MCP server (`dist/mcp-server.js`) exposes nine read-only tools: `resolve_status`, `resolve_capabilities`, four inspection tools, `resolve_read_response`, `resolve_clear_pending`, and `resolve_last_error`. Inspection tools queue by default because each queued request needs the manual Bridge trigger; `wait: true` blocks instead.
+
+For each tool:
 
 - input schema is validated in Node;
 - capability status is checked;
