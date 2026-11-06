@@ -272,6 +272,18 @@ elseif command == "media.createBin" then
 elseif command == "media.import" then
   local status, result, errorInfo = runInspection(context.importMedia)
   writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.create" then
+  local status, result, errorInfo = runInspection(context.createTimeline)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.appendClips" then
+  local status, result, errorInfo = runInspection(context.appendClips)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.deleteClips" then
+  local status, result, errorInfo = runInspection(context.deleteClips)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.setItemProperty" then
+  local status, result, errorInfo = runInspection(context.setItemProperty)
+  writeResponse(status, result, errorInfo, metaFrom(result))
 else
   prefs.setStage("unsupported-command")
   writeResponse("unsupported", nil, {

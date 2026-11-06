@@ -6,6 +6,11 @@ import type { BridgeManager } from "../bridge/bridge-manager.js";
 import type { FileBridge } from "../bridge/file-bridge.js";
 import { getEnvironmentSnapshot, probeTcpPort, getResolveProcessInfo } from "../config/environment.js";
 import { listCapabilities, summarizeCapabilities } from "./resolve-capabilities.js";
+import {
+  runReelWorkflow,
+  type ReelWorkflowInput,
+  type ReelWorkflowResult
+} from "./editing-workflow.js";
 
 export interface PingResult {
   message: string;
@@ -121,6 +126,45 @@ export class ResolveClient {
     return response;
   }
 
+  async createTimeline(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.create", payload, { timeoutMs });
+    return response;
+  }
+
+  async appendClips(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.appendClips", payload, { timeoutMs });
+    return response;
+  }
+
+  async deleteClips(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.deleteClips", payload, { timeoutMs });
+    return response;
+  }
+
+  async setItemProperty(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.setItemProperty", payload, { timeoutMs });
+    return response;
+  }
+
+  async makeReel(
+    input: ReelWorkflowInput,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<ReelWorkflowResult> {
+    return runReelWorkflow(this, input, timeoutMs);
+  }
+
   async status(): Promise<ResolveStatus> {
     const [environment, processInfo, portListening] = await Promise.all([
       getEnvironmentSnapshot(this.settings),
@@ -141,7 +185,7 @@ export class ResolveClient {
       },
       connection: {
         nodeToResolveDirect: portListening,
-        manualLuaTriggerRequired: !portListening,
+        manualLuaTriggerRequired: bridge.manualTriggerRequired,
         lastRequestPending: bridge.pendingRequest !== null
       }
     };

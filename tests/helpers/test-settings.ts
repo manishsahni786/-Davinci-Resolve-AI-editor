@@ -16,6 +16,9 @@ export async function createTestSettings(overrides: Partial<AppSettings> = {}): 
     fusionPrefsPath: path.join(root, "Fusion.prefs"),
     commandTimeoutMs: 500,
     pollIntervalMs: 10,
+    autoTrigger: false,
+    autoTriggerIntervalMs: 100,
+    autoTriggerScriptPath: path.join(root, "invoke-bridge.ps1"),
     logLevel: "debug",
     ...overrides
   };

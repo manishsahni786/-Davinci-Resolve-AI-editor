@@ -133,6 +133,7 @@ check(json.decode(json.encode(projectResult)).project.name == "Fake Project", "p
 local mediaResult, mediaFailure = context.inspectMedia({})
 check(mediaFailure == nil and mediaResult.mediaPool.clipCount == 1, "media clip count")
 check(mediaResult.mediaPool.bins[1].clips[1].name == "clip1.mov", "media clip summary")
+check(mediaResult.mediaPool.bins[1].clips[1].durationSeconds == 10, "media duration seconds from frames and fps")
 
 local timelineResult, timelineFailure = context.inspectTimeline({})
 check(timelineFailure == nil and timelineResult.timeline.name == "Timeline 1", "timeline inspection")
@@ -279,6 +280,166 @@ local missingBin, missingBinFailure = context.importMedia({
   binPath = "Missing/Bin"
 })
 check(missingBin ~= nil and missingBinFailure.code == "BIN_NOT_FOUND", "missing import bin rejected")
+
+local timelineItems = { __flags = 4194304 }
+local managedTimelines = {}
+local function makeManagedTimeline(name, uniqueId)
+  local timelineObject = {
+    name = name,
+    uniqueId = uniqueId or ("timeline-" .. name),
+    GetName = function(self) return self.name end,
+    GetUniqueId = function(self) return self.uniqueId end,
+    GetStartFrame = function() return 0 end,
+    GetEndFrame = function() return 239 end,
+    GetStartTimecode = function() return "01:00:00:00" end,
+    GetTrackCount = function(_, kind) return kind == "subtitle" and 0 or 1 end,
+    GetSettings = function() return { timelineFrameRate = "24" } end,
+    GetMarkers = function() return { __flags = 4194304 } end,
+    GetItemListInTrack = function(_, kind, index)
+      if kind == "video" and index == 1 then
+        return timelineItems
+      end
+      return { __flags = 4194304 }
+    end,
+    DeleteClips = function(_, items)
+      local remaining = { __flags = 4194304 }
+      local remove = {}
+      for _, victim in ipairs(items) do
+        remove[victim] = true
+      end
+      for _, existing in ipairs(timelineItems) do
+        if not remove[existing] then
+          remaining[#remaining + 1] = existing
+        end
+      end
+      timelineItems = remaining
+      return true
+    end
+  }
+  return timelineObject
+end
+
+local function makeTimelineItem(name, startFrame, finishFrame)
+  local properties = {}
+  return {
+    GetName = function() return name end,
+    GetStart = function() return startFrame end,
+    GetEnd = function() return finishFrame end,
+    GetDuration = function() return finishFrame - startFrame end,
+    GetTrackType = function() return "video" end,
+    GetTrackIndex = function() return 1 end,
+    SetProperties = function(_, values)
+      for key, value in pairs(values) do
+        properties[key] = value
+      end
+      return true
+    end,
+    SetClipColor = function(_, color)
+      properties["Clip Color"] = color
+      return true
+    end,
+    GetProperty = function(_, key)
+      return properties[key]
+    end
+  }
+end
+
+managedRoot.GetClipList = function()
+  return { __flags = 4194304, [1] = clip }
+end
+
+managedPool.CreateEmptyTimeline = function(_, name)
+  local created = makeManagedTimeline(name)
+  managedTimelines[#managedTimelines + 1] = created
+  managedCurrentProject._currentTimeline = created
+  return created
+end
+managedPool.CreateTimelineFromClips = function(_, name, items)
+  local created = makeManagedTimeline(name)
+  timelineItems = { __flags = 4194304 }
+  for index, mediaItem in ipairs(items) do
+    timelineItems[#timelineItems + 1] = makeTimelineItem(
+      mediaItem.GetName(),
+      (index - 1) * 240,
+      index * 240
+    )
+  end
+  managedTimelines[#managedTimelines + 1] = created
+  managedCurrentProject._currentTimeline = created
+  return created
+end
+managedPool.AppendToTimeline = function(_, items)
+  local appended = { __flags = 4194304 }
+  local start = 0
+  if #timelineItems > 0 then
+    start = timelineItems[#timelineItems].GetEnd()
+  end
+  for _, mediaItem in ipairs(items) do
+    local item = makeTimelineItem(mediaItem.GetName(), start, start + 240)
+    timelineItems[#timelineItems + 1] = item
+    appended[#appended + 1] = item
+    start = start + 240
+  end
+  return appended
+end
+
+managedCurrentProject.GetTimelineCount = function() return #managedTimelines end
+managedCurrentProject.GetCurrentTimeline = function() return managedCurrentProject._currentTimeline end
+managedCurrentProject.GetTimelineByIndex = function(_, index) return managedTimelines[index] end
+managedCurrentProject._currentTimeline = nil
+
+local emptyTimeline, emptyTimelineFailure = context.createTimeline({ name = "Empty Reel" })
+check(emptyTimelineFailure == nil and emptyTimeline.timeline.name == "Empty Reel", "create empty timeline")
+check(emptyTimeline.created == true, "empty timeline created flag")
+
+local fromClips, fromClipsFailure = context.createTimeline({
+  name = "From Clips",
+  mediaIds = { "clip-id-1" }
+})
+check(fromClipsFailure == nil and fromClips.timeline.name == "From Clips", "create timeline from clips")
+check(#timelineItems == 1, "timeline from clips has one item")
+
+local missingClipTimeline, missingClipFailure = context.createTimeline({
+  name = "Missing",
+  mediaIds = { "no-such-clip" }
+})
+check(missingClipTimeline ~= nil and missingClipFailure.code == "TIMELINE_CLIP_NOT_FOUND", "missing clip rejected on create")
+
+local appendedClips, appendFailure = context.appendClips({ mediaIds = { "media-id-1" } })
+check(appendFailure == nil and appendedClips.appended.count == 1, "append clips to timeline")
+check(#timelineItems == 2, "timeline has two items after append")
+
+local setPropertyResult, setPropertyFailure = context.setItemProperty({
+  target = { trackType = "video", trackIndex = 1, itemIndex = 1 },
+  properties = { Color = "Blue" }
+})
+check(setPropertyFailure == nil and setPropertyResult.applied[1].key == "Color", "set timeline item property")
+check(setPropertyResult.applied[1].applied == true, "property applied flag")
+
+local clipColorResult, clipColorFailure = context.setItemProperty({
+  target = { trackType = "video", trackIndex = 1, itemIndex = 1 },
+  properties = { ["Clip Color"] = "Blue" }
+})
+check(clipColorFailure == nil and clipColorResult.applied[1].key == "Clip Color", "set clip color")
+check(clipColorResult.applied[1].applied == true, "clip color applied flag")
+
+local unsupportedNameResult, unsupportedNameFailure = context.setItemProperty({
+  target = { trackType = "video", trackIndex = 1, itemIndex = 1 },
+  properties = { Name = "New name" }
+})
+check(unsupportedNameFailure ~= nil and unsupportedNameFailure.code == "PROPERTY_SET_FAILED", "failed property call returns failure")
+check(unsupportedNameResult.applied[1].applied == false, "failed property call is marked unapplied")
+
+local deletedClips, deleteFailure = context.deleteClips({
+  targets = { { trackType = "video", trackIndex = 1, itemIndices = { 2 } } }
+})
+check(deleteFailure == nil and deletedClips.deleted.count == 1, "delete timeline clips")
+check(#timelineItems == 1, "timeline has one item after delete")
+
+local missingItem, missingItemFailure = context.deleteClips({
+  targets = { { trackType = "video", trackIndex = 1, itemIndices = { 9 } } }
+})
+check(missingItem ~= nil and missingItemFailure.code == "TIMELINE_ITEM_NOT_FOUND", "missing timeline item rejected")
 
 local prefs = dofile(root .. "\\lib\\prefs.lua")
 local store = {}

@@ -1,11 +1,13 @@
 # Environment Diagnostics
 
 Date: 2026-10-30  
-Updated: 2026-11-02
+Updated: 2026-11-05
 Project: AI Video Editor (OpenCode + DaVinci Resolve Free 21.1)
-Milestones: 1-3 - environment inspection, bridge, read-only inspection, and MCP server
+Milestones: 1-5 - environment inspection, bridge, read-only inspection, MCP server, project/media management, and timeline editing
 
 This report separates measured facts from assumptions. Anything not yet exercised inside Resolve is marked **supported but not yet tested**, not "working".
+
+The original Python, pip and FFmpeg rows below are a dated 2026-10-30 snapshot. The 2026-11-05 media-analysis environment and Ollama measurements are in section 14.
 
 ## 1. Machine
 
@@ -130,8 +132,9 @@ Node.js
   (unique id, atomic rename)
         |
         v
-User triggers:
+Node invokes (Windows UI Automation, default):
 Workspace > Scripts > Utility > AI Video Editor Bridge
+(manual fallback when AVE_AUTO_TRIGGER=false)
         |
         v
 bridge.lua
@@ -149,15 +152,16 @@ Design choices:
 - **Single queue slot** (`next.request.json` + `next.request.lua`) prevents two timeline-modifying commands from being processed concurrently.
 - **Unique request id** inside the envelope provides correlation and auditability.
 - **Atomic temp-file + rename** avoids partially written JSON.
-- **No background polling loop** because Resolve runs menu Lua synchronously on the UI thread. A loop would freeze the UI. The processor is intentionally a manual action.
-- **Timeout is a failure**, not a success. The queued request remains available for a later manual trigger.
+- **No background polling loop** because Resolve runs menu Lua synchronously on the UI thread. A loop would freeze the UI. Each request is instead invoked from outside Resolve with Windows UI Automation (`resolve-scripts/invoke-bridge.ps1`).
+- **Optional auto-trigger is throttled and stops after one success.** It is disabled by default; manual menu launch is the required workflow.
+- **Timeout is a failure**, not a success. The queued request remains available for a later read or manual trigger.
 - **Fusion prefs response channel** because Resolve Free's internal Lua has `io = nil` and cannot write response files.
 - **Response schema validation** rejects malformed or mismatched replies.
 - **Logs** are JSONL in `logs/`; Node persists the received response for audit.
 
 ### Verified parts of the bridge
 
-Verified by automated tests and by manual menu invocation inside the running Resolve application:
+Verified by automated tests and by live invocation inside the running Resolve application:
 
 - Request creation, unique ids, JSON serialization, schema validation.
 - Atomic request writes and local response persistence.
@@ -170,6 +174,7 @@ Verified by automated tests and by manual menu invocation inside the running Res
 - Fusion prefs response channel (live and unit-tested).
 - Internal Resolve object: `resolveConnected: true`, version `21.1.0.17`.
 - Internal Lua sandbox: `io = nil`, `bmd.readfile = nil`, `loadfile` available.
+- Windows UI Automation menu invocation: `resolve:test`, all four timeline commands and `reel` ran with no manual click.
 
 ### Sandbox findings
 
@@ -191,24 +196,26 @@ Verified by automated tests and by manual menu invocation inside the running Res
 
 | Capability | Evidence |
 | --- | --- |
-| Workspace > Scripts menu Lua execution | Verified by manual Bridge invocation |
+| Workspace > Scripts menu Lua execution | Verified live, including automatic UI Automation invocation |
 | Internal Resolve object | `resolveConnected: true`, version `21.1.0.17` |
-| Node/TypeScript project toolchain | typecheck + 35 unit tests passed |
+| Node/TypeScript project toolchain | typecheck + 108 unit tests passed; 1 live Resolve integration test skipped |
 | File bridge mechanics | Unit tests, prefs test, and mock adapter |
 | Fusion prefs response channel | Live Resolve round-trip + unit test |
+| Optional auto-trigger | Previously verified live; disabled by default |
 | Read-only inspection commands | Live `project.inspect`, `media.inspect`, `timeline.inspect` and `render.inspect` all returned `ok: true` |
-| MCP stdio server | Real SDK client handshake listed 9 tools; MCP queue, read, wait and clear tests pass |
-| Lua JSON and protocol | 38 Lua tests passed |
-| Python stdlib worker protocol | 5 Python tests passed |
+| Project and media management | Live project create/open/save, bin create, media import |
+| Timeline editing | Live create/append/delete/set-property (`Clip Color` = Blue) |
+| Reel rough-cut workflow | Live project reuse, media inspect, clip selection, timeline create and save |
+| MCP stdio server | Real SDK client handshake; 25 tools; MCP queue/read/wait/clear and plan lifecycle tests pass |
+| Lua JSON and protocol | 68 Lua tests passed |
+| Python media-analysis worker | 49 Python tests passed |
 | Internal script installation without overwriting old scripts | Installer backup + separate folder |
 
 ### Supported but not yet tested (inside Resolve Free)
 
 | Capability | Why it is plausible | What must happen |
 | --- | --- | --- |
-| Project create/open/save/list | `ProjectManager` methods in `DaVinciResolveScript.pyi` | Milestone 4 |
-| Media import | `MediaPool.ImportMedia` | Milestone 4 |
-| Timeline creation and editing | `CreateEmptyTimeline`, `DeleteClips`, `SetProperties`, `AddTransition` | Milestone 5 |
+| Trimmed timeline append | `startFrame`/`endFrame` clip info in `AppendToTimeline` | Not started; needed for highlight cuts |
 | MP4/H.264 render queue | `AddRenderJob`, `SetRenderSettings`, `StartRendering` | Milestone 6; query codecs at runtime |
 | Resolve-native scene cuts | `Timeline.DetectSceneCuts` | Milestone 7 |
 | Resolve-native transcription | `MediaPoolItem.TranscribeAudio` | Milestone 7; Studio/Extras status not assumed |
@@ -231,19 +238,25 @@ Verified by automated tests and by manual menu invocation inside the running Res
 | Continuous background polling inside Resolve | No supported idle/background callback; a blocking loop freezes the UI |
 | Direct TCP bridge into Resolve Free | Same external-scripting restriction |
 
+### Automatic but UI-dependent
+
+| Capability | Status |
+| --- | --- |
+| Processing a queued bridge request | Automated through Windows UI Automation; Resolve must be running with its main window available |
+| Making new scripts appear in the menu | Requires a Resolve restart after installation |
+| Confirming a destructive edit | Still required by the safety workflow |
+
 ### Requires manual user interaction
 
 | Capability | Reason |
 | --- | --- |
-| Processing a queued bridge request | Resolve must run the Lua menu script |
-| Making new scripts appear in the menu | Restart Resolve after installation |
-| Confirming a destructive edit | Required by the planned safety workflow |
+| Manual Bridge launch | Required for each request by the current workflow |
 
 ## 7. Blockers and risks
 
-1. **Manual trigger latency.** Every Resolve command needs a user action until/unless a supported asynchronous mechanism is found. The MCP server must surface this clearly rather than hanging silently.
+1. **UI-automation fragility.** The bridge no longer needs a click, but UI Automation depends on Resolve's main window being visible and responsive. Minimized windows, focus changes, or UI changes can break the trigger. The manual menu fallback and explicit trigger error codes keep failures diagnosable.
 2. **Optional API availability differs in Free.** `Project.GetRenderSettings` is absent from the verified internal context; optional methods are guarded and omitted rather than treated as failures.
-3. **No pip and no FFmpeg.** Media analysis cannot start until both are addressed.
+3. **FFmpeg/FFprobe are still missing in the current virtual environment.** Video probing and frame sampling cannot run until paths are configured; current Python package and Ollama status is recorded in section 14.
 4. **Free/Studio API differences.** Codec lists, transcription, AI features and some render options must be queried at runtime. No codec or Studio-only method will be hard-coded as available.
 5. **Sandbox and prefs limits.** Internal Lua has no `io`, so response delivery depends on Fusion preferences. `fusion:SavePrefs` is a best-effort UI-thread write; Node validates the response and still treats timeouts as failures. Local response persistence and request archiving are handled by Node.
 
@@ -276,7 +289,14 @@ npm run resolve:media
 npm run resolve:timeline
 npm run resolve:render
 
-# If it times out, trigger the bridge in Resolve, then read the response
+# Timeline editing and rough-cut reel
+npm run resolve:timeline-create -- "Reel Test"
+npm run resolve:timeline-append -- <uniqueId>
+npm run resolve:timeline-set-property -- video 1 1 --key="Clip Color" --value=Blue
+npm run resolve:timeline-delete -- video 1 1
+npm run reel -- --topic="frost" --timeline="Reel Workflow Test" --platform=instagram
+
+# If it times out, read the response (or trigger the bridge manually)
 npm run resolve:read -- <request-id>
 
 # If the request must be discarded
@@ -293,7 +313,7 @@ Milestone 1 is complete when all of the following are true:
 - [x] File bridge implemented with ids, atomic writes, timeouts, validation, logging and recovery.
 - [x] Lua bridge and diagnostics scripts implemented.
 - [x] Tests and mock adapter pass without Resolve.
-- [x] **Manual:** `npm run resolve:test` returns `resolveConnected: true` after the Scripts-menu trigger.
+- [x] `npm run resolve:test` returns `resolveConnected: true` after the automatic UI Automation trigger (manual fallback also works).
 
 ## 10. Milestone 2 exit criteria
 
@@ -302,9 +322,40 @@ Milestone 1 is complete when all of the following are true:
 - [x] All four inspection commands verified live in Resolve Free `21.1.0.17`.
 - [x] TypeScript, Lua and Python tests pass.
 
+## 14. Media-analysis update (2026-11-05)
+
+| Item | Measured current state |
+| --- | --- |
+| Python used by project scripts | `.venv\Scripts\python.exe`, Python 3.12.13, pip 25.0.1 |
+| Installed media modules | NumPy 2.5.4, OpenCV 5.0.0.93, PySceneDetect 0.7.2 |
+| Missing media tools/modules | FFmpeg, FFprobe, SciPy, Pillow, faster-whisper, Whisper, imageio-ffmpeg |
+| Default system `python.exe` | Broken install under `D:\Softwares`; fails importing `encodings` |
+| Python script resolution | `AVE_PYTHON_PATH`, then project `.venv`, then `python` on PATH |
+| Ollama API | Version 0.40.14, local `qwen3-vl:2b` model reachable |
+| GPU | NVIDIA GeForce GTX 1650 Max-Q, 4 GB |
+
+The exact-timestamp live vision prompt benchmark is `data/analysis-cache/results/vision-benchmark-live-full-2026-11-05.json`; the 768-token JSON-quality check is `vision-benchmark-json-quality-2026-11-05.json`. A live 8192-context warm-up and allocation check stopped at the configured CPU-offload limit; its per-run record is `data/analysis-cache/vision-requests/live-gpu-gate-check.jsonl`. The benchmarks test Ollama directly from sampled images; they do not verify source-video probing because FFmpeg/FFprobe are missing. See [Local vision analysis](VISION_ANALYSIS.md) for measured context allocation, inference settings, JSON recovery, and the next-test procedure.
+
 ## 11. Milestone 3 exit criteria
 
 - [x] MCP stdio server implemented and registered in `opencode.json`.
 - [x] Nine read-only tools for status, capabilities, inspection, response reading, clearing and errors.
-- [x] Queue-by-default workflow avoids MCP timeouts while waiting for a manual Bridge click.
+- [x] MCP calls queue requests and expose ids for manual Bridge launch and response reading.
 - [x] SDK stdio handshake and MCP tests pass.
+
+## 12. Milestone 4 exit criteria
+
+- [x] Project create/open/save and media bin/import commands implemented.
+- [x] All five management commands verified live in Resolve Free `21.1.0.17`.
+- [x] Capability matrix entries `resolve.project-management` and `resolve.media-management` marked `verified`.
+- [x] TypeScript, Lua and MCP tests cover management success and failure paths.
+
+## 13. Milestone 5 exit criteria
+
+- [x] Timeline create/append/delete/set-property commands implemented in Lua, mock, CLI and MCP.
+- [x] Offline TypeScript, Lua and MCP tests cover timeline editing success and failure paths.
+- [x] All four timeline commands verified live in Resolve Free `21.1.0.17` (`timeline.create`, `timeline.appendClips`, `timeline.deleteClips`, `timeline.setItemProperty` with `Clip Color` = Blue).
+- [x] Windows UI Automation auto-trigger verified live as an optional path; manual launch is the current default requirement.
+- [x] `npm run reel` rough-cut workflow verified live (project reuse, media inspection, clip selection, timeline create, save).
+- [x] Capability matrix entries `resolve.timeline-editing`, `bridge.auto-trigger` and `resolve.editing-workflow` marked `verified`.
+- [x] Trimmed append, transitions, audio mixing and render are explicitly out of scope for Milestone 5.

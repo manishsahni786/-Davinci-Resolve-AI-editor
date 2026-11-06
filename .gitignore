@@ -17,6 +17,8 @@ data/requests/archive/
 data/responses/*.json
 data/projects/
 data/media/
+data/plans/
+data/analysis-cache/
 logs/*
 !logs/.gitkeep
 !data/requests/.gitkeep
@@ -25,6 +27,7 @@ logs/*
 !data/media/.gitkeep
 
 # Python
+.venv/
 python/.venv/
 __pycache__/
 *.py[cod]

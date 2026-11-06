@@ -34,15 +34,24 @@ export const MANAGEMENT_COMMANDS = [
   "media.import"
 ] as const;
 
+export const TIMELINE_EDITING_COMMANDS = [
+  "timeline.create",
+  "timeline.appendClips",
+  "timeline.deleteClips",
+  "timeline.setItemProperty"
+] as const;
+
 export const BRIDGE_COMMANDS = [
   ...MILESTONE_1_COMMANDS,
   ...INSPECTION_COMMANDS,
-  ...MANAGEMENT_COMMANDS
+  ...MANAGEMENT_COMMANDS,
+  ...TIMELINE_EDITING_COMMANDS
 ] as const;
 
 export type Milestone1Command = (typeof MILESTONE_1_COMMANDS)[number];
 export type InspectionCommand = (typeof INSPECTION_COMMANDS)[number];
 export type ManagementCommand = (typeof MANAGEMENT_COMMANDS)[number];
+export type TimelineEditingCommand = (typeof TIMELINE_EDITING_COMMANDS)[number];
 export type BridgeCommand = (typeof BRIDGE_COMMANDS)[number];
 
 const requestIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
@@ -80,6 +89,31 @@ const binPathSchema = z.string().trim().max(4096).refine(
   isSafeBinPath,
   "Bin paths must be slash-separated names without empty, '.' or '..' segments."
 );
+const mediaIdSchema = z.string().trim().min(1).max(64).refine(
+  (value) => /^[A-Za-z0-9._-]+$/.test(value),
+  "Media ids must contain only letters, digits, '.', '_' and '-'."
+);
+const trackTypeSchema = z.enum(["video", "audio", "subtitle"]);
+const trackIndexSchema = z.number().int().min(1).max(100);
+const itemIndexSchema = z.number().int().min(1).max(500);
+
+const deleteTargetSchema = z.object({
+  trackType: trackTypeSchema,
+  trackIndex: trackIndexSchema,
+  itemIndices: z.array(itemIndexSchema).min(1).max(200)
+}).strict();
+
+const itemTargetSchema = z.object({
+  trackType: trackTypeSchema,
+  trackIndex: trackIndexSchema,
+  itemIndex: itemIndexSchema
+}).strict();
+
+const itemPropertySchema = z.union([
+  z.string().max(256),
+  z.number(),
+  z.boolean()
+]);
 
 export const BridgeRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -268,6 +302,23 @@ export const COMMAND_PAYLOAD_SCHEMAS = {
   "media.import": z.object({
     filePaths: z.array(filePathSchema).min(1).max(100),
     binPath: binPathSchema.optional()
+  }).strict(),
+  "timeline.create": z.object({
+    name: nameSchema.optional(),
+    mediaIds: z.array(mediaIdSchema).max(100).optional()
+  }).strict(),
+  "timeline.appendClips": z.object({
+    mediaIds: z.array(mediaIdSchema).min(1).max(100)
+  }).strict(),
+  "timeline.deleteClips": z.object({
+    targets: z.array(deleteTargetSchema).min(1).max(50)
+  }).strict(),
+  "timeline.setItemProperty": z.object({
+    target: itemTargetSchema,
+    properties: z.record(z.string().min(1).max(64), itemPropertySchema).refine(
+      (value) => Object.keys(value).length > 0 && Object.keys(value).length <= 20,
+      "Provide between 1 and 20 properties."
+    )
   }).strict()
 } as const;
 

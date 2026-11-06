@@ -34,10 +34,26 @@ describe("resolve capability matrix", () => {
     expect(capability?.status).toBe("unsupported");
   });
 
-  it("does not mark timeline editing as verified yet", () => {
+  it("marks milestone 5 timeline editing as verified", () => {
     const capability = getCapability("resolve.timeline-editing");
-    expect(capability?.status).toBe("supported-untested");
-    expect(capability?.implemented).toBe(false);
+    expect(capability?.status).toBe("verified");
+    expect(capability?.implemented).toBe(true);
+    expect(capability?.milestone).toBe("5");
+    expect(capability?.evidence).toContain("timeline.setItemProperty");
+    expect(capability?.evidence).toContain("timeline.deleteClips");
+    expect(capability?.evidence).toContain("Blue");
+  });
+
+  it("marks automatic bridge triggering and the reel workflow as verified", () => {
+    const trigger = getCapability("bridge.auto-trigger");
+    expect(trigger?.status).toBe("verified");
+    expect(trigger?.implemented).toBe(true);
+    expect(trigger?.evidence).toContain("UI Automation");
+
+    const workflow = getCapability("resolve.editing-workflow");
+    expect(workflow?.status).toBe("verified");
+    expect(workflow?.implemented).toBe(true);
+    expect(workflow?.evidence).toContain("npm run reel");
   });
 
   it("marks milestone 4 project and media management as verified", () => {

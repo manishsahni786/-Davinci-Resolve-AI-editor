@@ -563,6 +563,10 @@ local function stringMap(value)
 end
 
 local function clipSummary(clip, session)
+  local frames = recordCall(session, clip, "GetClipProperty", "Frames")
+  local fps = recordCall(session, clip, "GetClipProperty", "FPS")
+  local frameCount = tonumber(frames)
+  local frameRate = tonumber(fps)
   return {
     name = recordCall(session, clip, "GetName"),
     uniqueId = recordCall(session, clip, "GetUniqueId"),
@@ -570,9 +574,10 @@ local function clipSummary(clip, session)
     type = recordCall(session, clip, "GetClipProperty", "Type"),
     filePath = recordCall(session, clip, "GetClipProperty", "File Path"),
     duration = recordCall(session, clip, "GetClipProperty", "Duration"),
-    frames = recordCall(session, clip, "GetClipProperty", "Frames"),
+    frames = frames,
+    durationSeconds = frameCount and frameRate and frameRate > 0 and frameCount / frameRate or nil,
     resolution = recordCall(session, clip, "GetClipProperty", "Resolution"),
-    fps = recordCall(session, clip, "GetClipProperty", "FPS")
+    fps = fps
   }
 end
 
@@ -1247,6 +1252,527 @@ function context.importMedia(options)
     method = attempts[1],
     currentFolderRestored = restored
   }
+  return result, nil
+end
+
+local TRACK_TYPES = { video = true, audio = true, subtitle = true }
+
+local function validTrackType(value)
+  if type(value) == "string" and TRACK_TYPES[value] then
+    return value
+  end
+  return nil
+end
+
+local function idString(value)
+  if type(value) ~= "string" then
+    return nil
+  end
+  local id = trimmed(value)
+  if id == nil or id == "" or #id > 64 then
+    return nil
+  end
+  return id
+end
+
+-- Resolves media pool items by uniqueId or mediaId by walking every folder.
+-- Returns nil plus a missing-ids list when any id cannot be matched.
+local function findClipInFolder(folder, session)
+  local clips = arrayItems(recordCall(session, folder, "GetClipList"))
+  local byId = {}
+  for _, clip in ipairs(clips) do
+    local uniqueId = recordCall(session, clip, "GetUniqueId")
+    local mediaId = recordCall(session, clip, "GetMediaId")
+    if type(uniqueId) == "string" and uniqueId ~= "" then
+      byId[uniqueId] = clip
+    elseif type(uniqueId) == "number" then
+      byId[tostring(uniqueId)] = clip
+    end
+    if type(mediaId) == "string" and mediaId ~= "" then
+      byId[mediaId] = clip
+    elseif type(mediaId) == "number" then
+      byId[tostring(mediaId)] = clip
+    end
+  end
+  return byId
+end
+
+local function resolveMediaItems(session, mediaPool, mediaIds)
+  local wanted = {}
+  for index, rawId in ipairs(mediaIds) do
+    local id = idString(rawId)
+    if id == nil then
+      return nil, "Media id at index " .. tostring(index) .. " is invalid."
+    end
+    wanted[index] = id
+  end
+
+  local rootFolder = recordCall(session, mediaPool, "GetRootFolder")
+  if rootFolder == nil then
+    return nil, "Could not obtain the media pool root folder."
+  end
+
+  -- Depth-first walk; Resolve Free does not expose a flat clip iterator.
+  local byId = {}
+  local queue = { { folder = rootFolder, depth = 0 } }
+  while #queue > 0 do
+    local entry = table.remove(queue)
+    if entry.depth <= 32 then
+      for id, clip in pairs(findClipInFolder(entry.folder, session)) do
+        byId[id] = byId[id] or clip
+      end
+      local subfolders = arrayItems(recordCall(session, entry.folder, "GetSubFolderList"))
+      for _, subfolder in ipairs(subfolders) do
+        queue[#queue + 1] = { folder = subfolder, depth = entry.depth + 1 }
+      end
+    end
+  end
+
+  local items = {}
+  local missing = {}
+  for index, id in ipairs(wanted) do
+    local clip = byId[id]
+    if clip ~= nil then
+      items[#items + 1] = clip
+    else
+      missing[#missing + 1] = id
+    end
+  end
+  if #missing > 0 then
+    return nil, missing
+  end
+  return items
+end
+
+-- Resolves one timeline item from track coordinates (1-based, Resolve order).
+local function findTimelineItem(session, timeline, trackType, trackIndex, itemIndex)
+  local items = arrayItems(recordCall(
+    session,
+    timeline,
+    "GetItemListInTrack",
+    trackType,
+    trackIndex
+  ))
+  for index, item in ipairs(items) do
+    if index == itemIndex then
+      return item, #items
+    end
+  end
+  return nil, #items
+end
+
+function context.createTimeline(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local name = nil
+  if options.name ~= nil then
+    name = validName(options.name)
+    if name == nil then
+      result.failure = {
+        code = "INVALID_TIMELINE_NAME",
+        message = "Timeline name is empty or contains unsupported characters."
+      }
+      return result, result.failure
+    end
+  end
+
+  local mediaIds = options.mediaIds or {}
+  if type(mediaIds) ~= "table" then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "mediaIds must be an array of clip ids."
+    }
+    return result, result.failure
+  end
+  if #mediaIds > 100 then
+    result.failure = {
+      code = "TOO_MANY_MEDIA_IDS",
+      message = "At most 100 media ids can be used per timeline create."
+    }
+    return result, result.failure
+  end
+
+  -- Resolve requires a timeline name for both empty and clip-based create APIs.
+  local timelineName = name or "Timeline"
+
+  local timeline
+  if #mediaIds == 0 then
+    timeline = recordCall(session, mediaPool, "CreateEmptyTimeline", timelineName)
+  else
+    local items, resolveError = resolveMediaItems(session, mediaPool, mediaIds)
+    if items == nil then
+      result.failure = {
+        code = "TIMELINE_CLIP_NOT_FOUND",
+        message = "One or more media ids did not match media pool clips.",
+        details = { missingIds = resolveError }
+      }
+      return result, result.failure
+    end
+    timeline = recordCall(session, mediaPool, "CreateTimelineFromClips", timelineName, items)
+  end
+
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_CREATE_FAILED",
+      message = "Resolve did not create the timeline."
+    }
+    return result, result.failure
+  end
+
+  result.timeline = timelineSummary(timeline, session)
+  result.timelineName = result.timeline.name
+  result.timelines = listTimelines(session.project, session)
+  result.created = true
+  return result, nil
+end
+
+function context.appendClips(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local timeline = recordCall(session, session.project, "GetCurrentTimeline")
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_UNAVAILABLE",
+      message = "No current timeline is open."
+    }
+    return result, result.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local mediaIds = options.mediaIds
+  if type(mediaIds) ~= "table" or #mediaIds == 0 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "mediaIds must be a non-empty array of clip ids."
+    }
+    return result, result.failure
+  end
+  if #mediaIds > 100 then
+    result.failure = {
+      code = "TOO_MANY_MEDIA_IDS",
+      message = "At most 100 media ids can be appended per request."
+    }
+    return result, result.failure
+  end
+
+  local items, resolveError = resolveMediaItems(session, mediaPool, mediaIds)
+  if items == nil then
+    result.failure = {
+      code = "TIMELINE_CLIP_NOT_FOUND",
+      message = "One or more media ids did not match media pool clips.",
+      details = { missingIds = resolveError }
+    }
+    return result, result.failure
+  end
+
+  local appended = recordCall(session, mediaPool, "AppendToTimeline", items)
+  local appendedItems = arrayItems(appended)
+  if #appendedItems == 0 then
+    result.failure = {
+      code = "APPEND_FAILED",
+      message = "Resolve did not append any clips to the timeline."
+    }
+    return result, result.failure
+  end
+
+  local appendedSummaries = emptyArray()
+  for index = 1, #appendedItems do
+    appendedSummaries[#appendedSummaries + 1] = timelineItemSummary(appendedItems[index], session)
+  end
+
+  result.appended = {
+    count = #appendedSummaries,
+    items = appendedSummaries,
+    timelineName = recordCall(session, timeline, "GetName")
+  }
+  return result, nil
+end
+
+function context.deleteClips(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local timeline = recordCall(session, session.project, "GetCurrentTimeline")
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_UNAVAILABLE",
+      message = "No current timeline is open."
+    }
+    return result, result.failure
+  end
+
+  local targets = options.targets
+  if type(targets) ~= "table" or #targets == 0 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "targets must be a non-empty array of { trackType, trackIndex, itemIndices }."
+    }
+    return result, result.failure
+  end
+  if #targets > 50 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "At most 50 delete targets are allowed per request."
+    }
+    return result, result.failure
+  end
+
+  local deleteItems = {}
+  local requested = 0
+  for index, target in ipairs(targets) do
+    local trackType = validTrackType(type(target) == "table" and target.trackType or nil)
+    if trackType == nil then
+      result.failure = {
+        code = "VALIDATION_ERROR",
+        message = "Target at index " .. tostring(index) .. " has an invalid trackType."
+      }
+      return result, result.failure
+    end
+    local trackIndex = clampInteger(target.trackIndex, 0, 1, 100)
+    if trackIndex < 1 then
+      result.failure = {
+        code = "VALIDATION_ERROR",
+        message = "Target at index " .. tostring(index) .. " has an invalid trackIndex."
+      }
+      return result, result.failure
+    end
+    local itemIndices = type(target) == "table" and target.itemIndices or nil
+    if type(itemIndices) ~= "table" or #itemIndices == 0 then
+      result.failure = {
+        code = "VALIDATION_ERROR",
+        message = "Target at index " .. tostring(index) .. " has no itemIndices."
+      }
+      return result, result.failure
+    end
+
+    for _, rawItemIndex in ipairs(itemIndices) do
+      local itemIndex = clampInteger(rawItemIndex, 0, 1, 500)
+      if itemIndex < 1 then
+        result.failure = {
+          code = "VALIDATION_ERROR",
+          message = "Target at index " .. tostring(index) .. " has an invalid itemIndex."
+        }
+        return result, result.failure
+      end
+      local item = findTimelineItem(session, timeline, trackType, trackIndex, itemIndex)
+      if item == nil then
+        result.failure = {
+          code = "TIMELINE_ITEM_NOT_FOUND",
+          message = "Timeline item not found: "
+            .. trackType .. " track " .. tostring(trackIndex)
+            .. " item " .. tostring(itemIndex)
+        }
+        return result, result.failure
+      end
+      deleteItems[#deleteItems + 1] = item
+      requested = requested + 1
+    end
+  end
+
+  local deleted = recordCall(session, timeline, "DeleteClips", deleteItems)
+  if deleted ~= true then
+    result.failure = {
+      code = "DELETE_FAILED",
+      message = "Resolve did not delete the requested timeline items."
+    }
+    return result, result.failure
+  end
+
+  result.deleted = { count = requested }
+  return result, nil
+end
+
+function context.setItemProperty(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local timeline = recordCall(session, session.project, "GetCurrentTimeline")
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_UNAVAILABLE",
+      message = "No current timeline is open."
+    }
+    return result, result.failure
+  end
+
+  local target = options.target
+  if type(target) ~= "table" then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "target must be an object { trackType, trackIndex, itemIndex }."
+    }
+    return result, result.failure
+  end
+  local trackType = validTrackType(target.trackType)
+  if trackType == nil then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "target.trackType must be video, audio or subtitle."
+    }
+    return result, result.failure
+  end
+  local trackIndex = clampInteger(target.trackIndex, 0, 1, 100)
+  local itemIndex = clampInteger(target.itemIndex, 0, 1, 500)
+  if trackIndex < 1 or itemIndex < 1 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "target.trackIndex and target.itemIndex must be positive integers."
+    }
+    return result, result.failure
+  end
+
+  local properties = options.properties
+  if type(properties) ~= "table" then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "properties must be an object of { key = value } pairs."
+    }
+    return result, result.failure
+  end
+
+  local keys = {}
+  for key, value in pairs(properties) do
+    if type(key) ~= "string" or #key == 0 or #key > 64 then
+      result.failure = {
+        code = "VALIDATION_ERROR",
+        message = "Property keys must be non-empty strings of at most 64 characters."
+      }
+      return result, result.failure
+    end
+    if type(value) ~= "string" and type(value) ~= "number" and type(value) ~= "boolean" then
+      result.failure = {
+        code = "VALIDATION_ERROR",
+        message = "Property values must be strings, numbers or booleans."
+      }
+      return result, result.failure
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "properties must contain at least one key."
+    }
+    return result, result.failure
+  end
+  if #keys > 20 then
+    result.failure = {
+      code = "VALIDATION_ERROR",
+      message = "At most 20 properties can be set per request."
+    }
+    return result, result.failure
+  end
+
+  local item = findTimelineItem(session, timeline, trackType, trackIndex, itemIndex)
+  if item == nil then
+    result.failure = {
+      code = "TIMELINE_ITEM_NOT_FOUND",
+      message = "Timeline item not found: "
+        .. trackType .. " track " .. tostring(trackIndex)
+        .. " item " .. tostring(itemIndex)
+    }
+    return result, result.failure
+  end
+
+  local applied = emptyArray()
+  local batch = {}
+  local batchIndices = {}
+  local failedProperties = emptyArray()
+
+  for _, key in ipairs(keys) do
+    if key == "Clip Color" then
+      local appliedOk = recordCall(session, item, "SetClipColor", properties[key])
+      applied[#applied + 1] = {
+        key = key,
+        applied = appliedOk == true
+      }
+      if appliedOk ~= true then
+        failedProperties[#failedProperties + 1] = key
+      end
+    elseif key == "Name" or key == "Clip Name" then
+      local appliedOk = recordCall(session, item, "SetName", tostring(properties[key]))
+      applied[#applied + 1] = {
+        key = key,
+        applied = appliedOk == true
+      }
+      if appliedOk ~= true then
+        failedProperties[#failedProperties + 1] = key
+      end
+    else
+      batch[key] = properties[key]
+      batchIndices[#batchIndices + 1] = #applied + 1
+      applied[#applied + 1] = {
+        key = key,
+        applied = false
+      }
+    end
+  end
+
+  if next(batch) ~= nil then
+    local appliedOk = recordCall(session, item, "SetProperties", batch)
+    for _, index in ipairs(batchIndices) do
+      applied[index].applied = appliedOk == true
+      if appliedOk ~= true then
+        failedProperties[#failedProperties + 1] = applied[index].key
+      end
+    end
+  end
+
+  result.item = timelineItemSummary(item, session)
+  result.applied = applied
+  result.itemIndex = itemIndex
+  result.target = {
+    trackType = trackType,
+    trackIndex = trackIndex,
+    itemIndex = itemIndex
+  }
+  if #failedProperties > 0 then
+    result.failure = {
+      code = "PROPERTY_SET_FAILED",
+      message = "Resolve did not confirm that all requested timeline item properties were applied.",
+      details = { failedProperties = failedProperties }
+    }
+    return result, result.failure
+  end
   return result, nil
 end
 

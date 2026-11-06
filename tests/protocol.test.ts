@@ -95,6 +95,13 @@ describe("bridge message protocol", () => {
     expect(isKnownBridgeCommand("timeline.deleteClip")).toBe(false);
   });
 
+  it("knows the Milestone 5 timeline editing command set", () => {
+    expect(isKnownBridgeCommand("timeline.create")).toBe(true);
+    expect(isKnownBridgeCommand("timeline.appendClips")).toBe(true);
+    expect(isKnownBridgeCommand("timeline.deleteClips")).toBe(true);
+    expect(isKnownBridgeCommand("timeline.setItemProperty")).toBe(true);
+  });
+
   it("validates management payloads", () => {
     expect(validateCommandPayload("project.create", { name: "Reel A" })).toEqual({ name: "Reel A" });
     expect(validateCommandPayload("media.createBin", {
@@ -108,6 +115,28 @@ describe("bridge message protocol", () => {
     expect(() => validateCommandPayload("media.createBin", { name: "ok", parentPath: "../escape" })).toThrow();
     expect(() => validateCommandPayload("media.import", { filePaths: [] })).toThrow();
     expect(() => validateCommandPayload("media.import", { filePaths: ["C:/a.mp4"], binPath: "../escape" })).toThrow();
+  });
+
+  it("validates timeline editing payloads", () => {
+    expect(validateCommandPayload("timeline.create", { name: "Reel A" })).toEqual({ name: "Reel A" });
+    expect(validateCommandPayload("timeline.create", { mediaIds: ["media-1"] })).toEqual({ mediaIds: ["media-1"] });
+
+    expect(() => validateCommandPayload("timeline.create", { name: "bad/name" })).toThrow();
+    expect(() => validateCommandPayload("timeline.create", { unexpected: true })).toThrow();
+    expect(() => validateCommandPayload("timeline.appendClips", { mediaIds: [] })).toThrow();
+    expect(() => validateCommandPayload("timeline.deleteClips", { targets: [] })).toThrow();
+    expect(validateCommandPayload("timeline.deleteClips", {
+      targets: [{ trackType: "video", trackIndex: 1, itemIndices: [1] }]
+    })).toEqual({
+      targets: [{ trackType: "video", trackIndex: 1, itemIndices: [1] }]
+    });
+    expect(() => validateCommandPayload("timeline.setItemProperty", {
+      target: { trackType: "video", trackIndex: 1, itemIndex: 1 },
+      properties: {}
+    })).toThrow();
+    expect(() => validateCommandPayload("timeline.setItemProperty", {
+      target: { trackType: "video", trackIndex: 1, itemIndex: 1 }
+    })).toThrow();
   });
 
   it("builds a safe response filename", () => {

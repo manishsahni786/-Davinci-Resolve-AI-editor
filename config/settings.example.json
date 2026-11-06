@@ -4,5 +4,7 @@
   "logsDir": "C:\\Users\\manis\\OneDrive\\Desktop\\Divinci+ Opencode\\logs",
   "commandTimeoutMs": 120000,
   "pollIntervalMs": 500,
+  "autoTrigger": false,
+  "autoTriggerIntervalMs": 1500,
   "logLevel": "info"
 }

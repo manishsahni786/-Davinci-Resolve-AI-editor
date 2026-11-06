@@ -51,6 +51,9 @@ export interface BridgeHealth {
   unresolvedResponseCount: number;
   resolveProcessRunning: boolean;
   externalScriptingPortListening: boolean;
+  autoTriggerEnabled: boolean;
+  autoTriggerScriptPath: string | null;
+  manualTriggerRequired: boolean;
   fusionPrefsPath: string | null;
   fusionPrefsPresent: boolean;
   fusionBridgeStage: string | null;

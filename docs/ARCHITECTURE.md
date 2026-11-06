@@ -12,7 +12,7 @@
 5. Source media must never be modified or deleted.
 6. Natural-language text must never become shell commands or executable Lua.
 
-These constraints produce a hybrid Node.js + TypeScript + Lua + Python architecture with a **manually triggered, file-based command bridge**.
+These constraints produce a hybrid Node.js + TypeScript + Lua + Python architecture with a **serial file-based command bridge that the user launches from Resolve's Workspace > Scripts menu for every request**. Optional Windows UI Automation remains disabled by default.
 
 ## 2. Components
 
@@ -28,10 +28,11 @@ Node.js + TypeScript
    |- capability checks
    |- file bridge client
    |- request/response logs
+   |- UI Automation trigger (invoke-bridge.ps1)
    |
    | atomic JSON files
    v
-Lua inside Resolve (manual trigger)
+Lua inside Resolve (one request per menu invocation)
    |- request validation
    |- project / media pool / timeline / render operations
    |- structured JSON responses
@@ -60,24 +61,28 @@ Responsibilities:
 - Editing-command orchestration and serialization.
 - Capability checks before commands are queued.
 - File bridge client with ids, timeouts, retries, atomic writes and structured logs.
+- Automatic bridge trigger through Windows UI Automation, with throttling and a manual fallback.
 - Timeline operation planning and confirmation.
+- High-level reel assembly (`src/resolve/editing-workflow.ts`): project/bin/import/media/timeline orchestration with per-step results.
 - Calling the Python worker through JSON lines (Milestone 7).
 
 Current implementation:
 
 - `src/bridge/file-bridge.ts`
+- `src/bridge/resolve-trigger.ts`
 - `src/bridge/message-protocol.ts`
 - `src/bridge/bridge-manager.ts`
 - `src/config/environment.ts`
 - `src/config/settings.ts`
 - `src/resolve/resolve-capabilities.ts`
 - `src/resolve/resolve-client.ts`
+- `src/resolve/editing-workflow.ts`
 - `src/resolve/mock-resolve-adapter.ts`
 - `src/mcp/server.ts` MCP tool registration
 - `src/mcp-server.ts` MCP stdio entry point
 - `src/index.ts` CLI
 
-The mock adapter implements the full current command set (inspection and management) with in-memory project/bin/clip state, so unit tests never require Resolve.
+The mock adapter implements the full current command set (inspection, management and timeline editing) with in-memory project/bin/clip/timeline state, so unit tests never require Resolve.
 
 ### Lua inside Resolve
 
@@ -92,12 +97,13 @@ Responsibilities:
 Current implementation:
 
 - `resolve-scripts/bridge.lua` â€” one-request processor.
+- `resolve-scripts/invoke-bridge.ps1` â€” Windows UI Automation menu trigger.
 - `resolve-scripts/diagnostics.lua` â€” standalone diagnostic report.
 - `resolve-scripts/lib/json.lua` â€” dependency-free JSON.
 - `resolve-scripts/lib/paths.lua` â€” config, atomic writes, logging.
-- `resolve-scripts/lib/resolve-context.lua` â€” inspection plus Milestone 4 management commands (`project.create`, `project.open`, `project.save`, `media.createBin`, `media.import`, all implemented in `bridge.lua`).
+- `resolve-scripts/lib/resolve-context.lua` — inspection, Milestone 4 management (`project.create`/`open`/`save`, `media.createBin`/`import`) and Milestone 5 timeline editing (`timeline.create`/`appendClips`/`deleteClips`/`setItemProperty`), all dispatched from `bridge.lua`.
 
-The Lua side deliberately implements **no timeline editing** yet; timeline editing is Milestone 5. The bridge response channel is in `resolve-scripts/lib/prefs.lua`.
+The Lua side implements whole-clip timeline editing for Milestone 5. The bridge response channel is in `resolve-scripts/lib/prefs.lua`.
 
 ### Python worker
 
@@ -147,13 +153,21 @@ data/requests/next.request.lua
 
 Only one request may occupy this slot. A second command gets `BRIDGE_BUSY` instead of risking concurrent timeline edits.
 
-### Process
+### Trigger
 
-The user invokes:
+After queueing, `FileBridge.waitForResponse` starts `resolve-scripts/invoke-bridge.ps1` through `src/bridge/resolve-trigger.ts`. The PowerShell script:
+
+1. Finds the running Resolve main window with Windows UI Automation.
+2. Opens the `Workspace` menu, then `Scripts`, then invokes `AI Video Editor Bridge`.
+3. Exits with a JSON result (`{ "ok": true, ... }` or an error code such as `RESOLVE_NOT_RUNNING`).
+
+This is input automation of Resolve's own menu, not external Resolve scripting. Triggers are throttled (`AVE_AUTO_TRIGGER_INTERVAL_MS`, default 1500 ms) and stop after the first successful invocation. Set `AVE_AUTO_TRIGGER=false` to disable automation and use the manual menu item:
 
 ```
 Workspace > Scripts > Utility > AI Video Editor Bridge
 ```
+
+### Process
 
 `bridge.lua`:
 
@@ -226,7 +240,7 @@ Statuses:
 
 | Code | Meaning | Manual action |
 | --- | --- | --- |
-| `BRIDGE_TIMEOUT` | No response before the deadline; request still queued | Run the Lua bridge |
+| `BRIDGE_TIMEOUT` | No response before the deadline; request still queued | Launch the Lua bridge manually, then read the response by request id |
 | `BRIDGE_BUSY` | Another request is pending | Process or clear it |
 | `BRIDGE_PROTOCOL_ERROR` | Malformed/mismatched JSON | Inspect logs |
 | `REQUEST_ALREADY_PROCESSED` | Request id was processed, but no replayable response remains | Issue a new request |
@@ -287,16 +301,16 @@ The Lua side will also perform runtime checks (for example, querying `GetRenderF
 | 2 | Lua bridge command expansion and transport hardening | Verified live (project, media, timeline and render inspection) |
 | 3 | MCP server and basic Resolve tools | Verified over stdio (9 read-only tools) |
 | 4 | Project and media management | Verified live (project create/open/save, bins, media import) |
-| 5 | Timeline inspection and editing | Not started |
+| 5 | Timeline creation and editing (whole-clip) | Verified live (create/append/delete/set-property; reel rough cut); manual launch is now required per request |
 | 6 | Rendering and export | Not started |
-| 7 | Python media analysis | Not started |
-| 8 | Natural-language editing planner | Not started |
-| 9 | Instagram Reel workflow | Not started |
+| 7 | Python media analysis | Read-only worker and MCP tool implemented, including two-pass `analyze_events` with evidence-backed boundaries; optional dependencies/models are not bundled and end-to-end analysis is not live-verified |
+| 8 | Structured editing plan, revision and approval lifecycle | Validation, local state and analysis-driven draft generation are implemented; execution is approval-gated and still whole-clips-only |
+| 9 | Polished Instagram Reel workflow (trim, transitions, audio) | Rough-cut assembly live; polishing not started |
 | 10 | Full test suite, docs, integration | Not started |
 
 ## 10. MCP mapping
 
-The MCP server (`dist/mcp-server.js`) exposes fourteen tools: `resolve_status`, `resolve_capabilities`, four inspection tools (`resolve_inspect_project`, `resolve_inspect_media`, `resolve_inspect_timeline`, `resolve_inspect_render`), five management tools (`resolve_create_project`, `resolve_open_project`, `resolve_save_project`, `resolve_create_bin`, `resolve_import_media`), and `resolve_read_response`, `resolve_clear_pending`, `resolve_last_error`. Inspection and management tools queue by default because each queued request needs the manual Bridge trigger; `wait: true` blocks instead.
+The MCP server (`dist/mcp-server.js`) exposes twenty-eight tools, including `resolve_analyze_media` for read-only media probing, scene cuts, silence, transcription, frame sampling, optional vision analysis, and two-pass `analyze_events` with explicit boundary uncertainty. `resolve_create_plan_from_analysis` converts analysis events into editing-plan draft clips (one clip per event, evidence preserved as frame items, unknown confidence recorded as 0 with a reason note, boundary uncertainty surfaced in clip reasons and plan warnings). Seven remaining editing-plan tools persist and validate proposal state locally. Execution requires approval and currently supports contiguous whole clips on a new timeline only. By default Resolve tools queue and return a request id; the user launches the Bridge in Resolve, then reads the response by id.
 
 For each tool:
 
@@ -305,6 +319,6 @@ For each tool:
 - capability status is checked;
 - destructive actions require confirmation;
 - the tool returns the structured request/response result;
-- timeouts explicitly tell the user to trigger the Lua bridge.
+- timeouts keep the request queued and report its id so the user can launch the Lua bridge manually and read the late response.
 
 No MCP tool will claim a Free-restricted operation succeeded. If an operation is impossible, the tool returns an `unsupported` result with the limitation and an alternative.

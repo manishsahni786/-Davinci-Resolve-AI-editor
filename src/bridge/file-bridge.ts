@@ -19,6 +19,7 @@ import {
   serializeResponse
 } from "./message-protocol.js";
 import type { FusionPrefsChannel } from "./fusion-prefs.js";
+import type { ResolveTrigger } from "./resolve-trigger.js";
 import {
   ensureDir,
   isMissingFileError,
@@ -62,7 +63,8 @@ export class FileBridge {
   constructor(
     private readonly settings: AppSettings,
     private readonly logger: Logger,
-    private readonly prefsChannel?: FusionPrefsChannel
+    private readonly prefsChannel?: FusionPrefsChannel,
+    private readonly trigger?: ResolveTrigger
   ) {
     this.requestPath = path.join(settings.requestsDir, REQUEST_FILE_NAME);
     this.luaRequestPath = path.join(settings.requestsDir, LUA_REQUEST_FILE_NAME);
@@ -160,8 +162,34 @@ export class FileBridge {
       requestId: request.id,
       command: request.command,
       responsePath,
-      timeoutMs
+      timeoutMs,
+      autoTrigger: this.trigger?.enabled ?? false
     });
+
+    let lastTriggerAt = 0;
+    let triggerSucceeded = false;
+    const maybeTrigger = (reason: string): void => {
+      const trigger = this.trigger;
+      if (!trigger?.enabled || triggerSucceeded) {
+        return;
+      }
+      if (Date.now() - lastTriggerAt < this.settings.autoTriggerIntervalMs) {
+        return;
+      }
+      lastTriggerAt = Date.now();
+      void trigger.trigger(reason).then((result) => {
+        if (result.ok) {
+          triggerSucceeded = true;
+          this.logger.info("Resolve bridge auto-triggered", {
+            requestId: request.id,
+            reason,
+            durationMs: result.durationMs
+          });
+        }
+      });
+    };
+
+    maybeTrigger("wait-start");
 
     while (Date.now() < deadline) {
       if (signal?.aborted) {
@@ -219,6 +247,8 @@ export class FileBridge {
         }
       }
 
+      maybeTrigger("wait-retry");
+
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         break;
@@ -232,10 +262,16 @@ export class FileBridge {
       responsePath
     });
 
-    throw new BridgeTimeoutError(
-      "No response from DaVinci Resolve. The request is still queued; run "
+    const hint = this.trigger?.enabled
+      ? "No response from DaVinci Resolve. The request is still queued; the automatic "
+        + "bridge trigger could not complete it. Confirm Resolve is running with a project "
+        + "open, then read the response with:"
+      : "No response from DaVinci Resolve. The request is still queued; run "
         + "Workspace > Scripts > Utility > AI Video Editor Bridge in Resolve, "
-        + `then read the response with: npm run resolve:read -- ${request.id}`,
+        + "then read the response with:";
+
+    throw new BridgeTimeoutError(
+      `${hint} npm run resolve:read -- ${request.id}`,
       {
         requestId: request.id,
         command: request.command,
@@ -349,6 +385,7 @@ export class FileBridge {
     const pending = await this.getPendingRequest();
     const responses = await listFiles(this.settings.responsesDir, ".json");
     const fusionState = this.prefsChannel ? await this.prefsChannel.readBridgeState() : null;
+    const autoTriggerEnabled = this.trigger?.enabled ?? false;
     return {
       initialized: this.initialized,
       requestsDir: this.settings.requestsDir,
@@ -358,6 +395,9 @@ export class FileBridge {
       unresolvedResponseCount: responses.length,
       resolveProcessRunning: runtime.resolveProcessRunning,
       externalScriptingPortListening: runtime.externalScriptingPortListening,
+      autoTriggerEnabled,
+      autoTriggerScriptPath: autoTriggerEnabled ? this.settings.autoTriggerScriptPath : null,
+      manualTriggerRequired: !runtime.externalScriptingPortListening && !autoTriggerEnabled,
       fusionPrefsPath: this.prefsChannel?.filePath ?? null,
       fusionPrefsPresent: this.prefsChannel ? await this.prefsChannel.exists() : false,
       fusionBridgeStage: fusionState?.stage ?? null,

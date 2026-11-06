@@ -134,7 +134,7 @@ The test exits non-zero if Resolve is not connected, if the Lua script cannot ob
 
 ## 5. Read-only inspection commands
 
-Milestone 2 adds four verified read-only commands. Queue one command at a time, trigger the Bridge menu, then read the response:
+Milestone 2 adds four verified read-only commands. Queue one command at a time, launch the Bridge in Resolve, then read the response:
 
 ```powershell
 npm run resolve:queue -- project.inspect
@@ -145,7 +145,7 @@ npm run resolve:queue -- timeline.inspect
 npm run resolve:queue -- render.inspect
 ```
 
-Convenience commands queue and wait for one manual trigger:
+Convenience commands queue and wait for the response; manually launch the Bridge while they wait:
 
 ```powershell
 npm run resolve:project
@@ -156,9 +156,39 @@ npm run resolve:render
 
 If no timeline is open, `timeline.inspect` returns `TIMELINE_UNAVAILABLE`. To inspect track items, open or create a timeline first. `render.inspect` reports formats, codecs, presets and current format/codec; `Project.GetRenderSettings` is absent in this Free internal context and is therefore omitted without an error.
 
+## 5b. Timeline editing commands (Milestone 5)
+
+After importing media, create and edit timelines one command at a time. Re-install scripts first so Resolve loads the updated Lua:
+
+```powershell
+npm run resolve:install-scripts
+```
+
+Then queue/wait with the CLI helpers. Each helper waits for you to launch the Bridge menu in Resolve:
+
+```powershell
+npm run resolve:media
+# note uniqueId / mediaId values from the response
+
+npm run resolve:timeline-create -- "AIVE Milestone 5 Reel" --media-ids=<uniqueId>
+npm run resolve:timeline-append -- <uniqueId>
+npm run resolve:timeline-set-property -- video 1 1 --key="Clip Color" --value=Blue
+npm run resolve:timeline-delete -- video 1 1
+```
+
+All four commands are verified live in Resolve Free 21.1.0.17 (2026-11-03). `timeline.setItemProperty` uses `SetClipColor` for `Clip Color` and `SetProperties` for other keys; `TimelineItem` has no `SetProperty` method. A command counts as verified only when it returns `ok: true` with `resolveConnected` context and its request id is archived under `data/responses/`.
+
+### Rough-cut reel workflow
+
+```powershell
+npm run reel -- --project="AIVE Milestone 4 Test" --topic="frost" --timeline="AIVE Reel Workflow Test" --platform=instagram
+```
+
+The workflow reuses or creates the project, creates a bin and imports media when `--media` is supplied, inspects the media pool, selects whole clips by topic token or `--clip-ids`, creates and saves the timeline. It warns about the target aspect ratio but does not trim, add transitions, mix audio or render yet.
+
 ## 6. Verification checklist
 
-Run these before starting Milestone 3:
+Run these before claiming a milestone complete:
 
 ```powershell
 npm test
@@ -168,7 +198,7 @@ npm run typecheck
 npm run resolve:test
 ```
 
-`npm run resolve:test` is the only test that requires a human in Resolve. It must report:
+`npm run resolve:test` is the only test that requires Resolve to be running. It should trigger the Bridge itself and report:
 
 ```text
 SUCCESS - Resolve responded through the Fusion prefs bridge.
@@ -180,7 +210,7 @@ and `meta.scriptContext` should indicate the predefined internal global. If it r
 
 ### Retry policy
 
-Mutating commands are **not** retried automatically. A timeout leaves the request queued, and the response can be read later by id. This prevents a slow manual trigger from causing a duplicate timeline edit or render. Read-only diagnostics follow the same rule so behavior is predictable.
+Mutating commands are **not** retried automatically. A timeout leaves the request queued, and the response can be read later by id. The bridge trigger itself is throttled and stops after the first successful invocation, so a slow response cannot cause a duplicate timeline edit or render. Read-only diagnostics follow the same rule so behavior is predictable.
 
 ## 7. Late responses and pending requests
 
@@ -191,7 +221,7 @@ data\requests\next.request.json
 data\requests\next.request.lua
 ```
 
-Trigger the bridge in Resolve, then read the response:
+Run `Workspace > Scripts > Utility > AI Video Editor Bridge`, then read the response:
 
 ```powershell
 npm run resolve:read -- <request-id>
@@ -211,7 +241,7 @@ npm run resolve:clear
 
 Clearing moves the request into `data\requests\archive\`.
 
-## 8. Why it is manual
+## 8. Why the bridge is not a loop
 
 Resolve Free does not expose external scripting on this machine:
 
@@ -219,7 +249,7 @@ Resolve Free does not expose external scripting on this machine:
 - `ResolvePython` cannot obtain the Resolve object,
 - `fuscript` `Resolve()` returns nil.
 
-Internal menu scripts can access the documented global `resolve`, but Resolve runs them synchronously on the UI thread. A background polling loop would freeze the application. The bridge therefore processes one request per manual trigger. This is a platform constraint, not an implementation shortcut.
+Internal menu scripts can access the documented global `resolve`, but Resolve runs them synchronously on the UI thread. A background polling loop would freeze the application. The bridge therefore processes one request per menu invocation. `resolve-scripts/invoke-bridge.ps1` performs that invocation from Node through Windows UI Automation, so the user does not have to click. This is a platform constraint plus a Windows input-automation shim, not external Resolve scripting.
 
 ## 9. Troubleshooting
 
@@ -240,6 +270,23 @@ Resolve enumerates scripts **directly** under `Utility`, not scripts buried in a
 ### "no queued request"
 
 The bridge ran with nothing to process. Queue a command from Node first (`npm run resolve:test` or `npm run resolve:queue -- <command>`). If a request was just queued, trigger the Bridge again after the queue file is visible.
+
+### Auto-trigger fails
+
+Check the last trigger error:
+
+```powershell
+npm run status
+```
+
+Common trigger codes:
+
+- `RESOLVE_NOT_RUNNING` - start DaVinci Resolve and open a project.
+- `WINDOW_NOT_FOUND` - the Resolve main window is minimized, hidden, or the app is still starting.
+- `MENU_NOT_FOUND` / `ITEM_NOT_FOUND` - the Bridge script is not installed; re-run `npm run resolve:install-scripts` and restart Resolve.
+- `TRIGGER_TIMEOUT` - UI Automation did not finish in time; retry once, or run the menu item manually.
+
+Set `AVE_AUTO_TRIGGER=false` to disable automation entirely. Set `AVE_AUTO_TRIGGER_SCRIPT` to use a different trigger script path.
 
 ### "REQUEST_ALREADY_PROCESSED"
 

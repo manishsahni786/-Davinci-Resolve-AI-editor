@@ -90,6 +90,7 @@ def main() -> int:
                 "Milestone 1 requires no third-party Python packages.",
                 "FFmpeg is not on PATH; imageio-ffmpeg is a possible pip-provided fallback.",
                 "Install OpenCV, PySceneDetect, faster-whisper and Pillow in a virtual environment before Milestone 7.",
+            "The MCP resolve_analyze_media tool is available; optional packages and model weights remain user-managed.",
             ],
         },
     }

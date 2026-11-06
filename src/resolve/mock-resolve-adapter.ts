@@ -55,6 +55,17 @@ interface MockBin {
 interface MockTimeline {
   name: string;
   uniqueId: string;
+  items: MockTimelineItem[];
+}
+
+interface MockTimelineItem {
+  name: string;
+  start: number;
+  finish: number;
+  duration: number;
+  trackType: string;
+  trackIndex: number;
+  properties: Record<string, string | number | boolean>;
 }
 
 interface MockProject {
@@ -67,6 +78,7 @@ interface MockState {
   currentProject: MockProject | null;
   bins: MockBin[];
   timelines: MockTimeline[];
+  currentTimelineName: string;
   saveCounter: number;
 }
 
@@ -85,8 +97,10 @@ function createMockState(projectName: string, timelineName: string): MockState {
     bins: [{ name: "Master Bin", path: "", clips: [] }],
     timelines: [{
       name: timelineName,
-      uniqueId: createMockId("tl", timelineName)
+      uniqueId: createMockId("tl", timelineName),
+      items: []
     }],
+    currentTimelineName: timelineName,
     saveCounter: 0
   };
 }
@@ -125,6 +139,73 @@ function mockBaseResult(state: MockState, options: Required<MockResolveAdapterOp
     scriptContext: "mock-resolve-adapter",
     errors: []
   };
+}
+
+function mockCurrentTimeline(state: MockState): MockTimeline | undefined {
+  if (state.currentTimelineName) {
+    const named = state.timelines.find((timeline) => timeline.name === state.currentTimelineName);
+    if (named) {
+      return named;
+    }
+  }
+  return state.timelines[0];
+}
+
+function findMockClipByMediaId(state: MockState, mediaId: string): MockClip | undefined {
+  for (const bin of state.bins) {
+    const clip = bin.clips.find(
+      (candidate) => candidate.uniqueId === mediaId || String(candidate.mediaId) === mediaId
+    );
+    if (clip) {
+      return clip;
+    }
+  }
+  return undefined;
+}
+
+function mockTimelineSummary(timeline: MockTimeline): Record<string, unknown> {
+  const endFrame = timeline.items.reduce((max, item) => Math.max(max, item.finish), 0);
+  return {
+    name: timeline.name,
+    uniqueId: timeline.uniqueId,
+    startFrame: 0,
+    endFrame,
+    startTimecode: "01:00:00:00",
+    videoTracks: 1,
+    audioTracks: 1,
+    subtitleTracks: 0,
+    settings: {}
+  };
+}
+
+function mockTrackSummaries(timeline: MockTimeline): Record<string, Array<{ index: number; itemCount: number; items: MockTimelineItem[]; truncated: boolean }>> {
+  const tracks: Record<string, Array<{ index: number; itemCount: number; items: MockTimelineItem[]; truncated: boolean }>> = {
+    video: [],
+    audio: [],
+    subtitle: []
+  };
+  const sorted = [...timeline.items].sort((left, right) => left.start - right.start);
+  const seen = new Set<string>();
+  const ordered: Array<{ trackType: string; trackIndex: number }> = [];
+  for (const item of sorted) {
+    const key = `${item.trackType}:${item.trackIndex}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      ordered.push({ trackType: item.trackType, trackIndex: item.trackIndex });
+    }
+  }
+  for (const entry of ordered) {
+    const items = sorted.filter(
+      (item) => item.trackType === entry.trackType && item.trackIndex === entry.trackIndex
+    );
+    tracks[entry.trackType]?.push({
+      index: entry.trackIndex,
+      itemCount: items.length,
+      items,
+      truncated: false
+    });
+  }
+  return tracks;
 }
 
 function mockProjectRecord(project: MockProject | null, state: MockState, options: Required<MockResolveAdapterOptions>): {
@@ -265,7 +346,7 @@ function handleMockCommand(
       const requestedIndex = typeof payloadRecord.timelineIndex === "number" ? payloadRecord.timelineIndex : null;
       const timeline = requestedIndex
         ? state.timelines[requestedIndex - 1]
-        : state.timelines[0];
+        : mockCurrentTimeline(state);
       if (!timeline) {
         throw new MockCommandError(
           "TIMELINE_UNAVAILABLE",
@@ -274,27 +355,14 @@ function handleMockCommand(
             : "Mock: no current timeline is open."
         );
       }
+      const tracks = mockTrackSummaries(timeline);
       return {
         ...base(),
-        timeline: {
-          name: timeline.name,
-          uniqueId: timeline.uniqueId,
-          startFrame: 0,
-          endFrame: 100,
-          startTimecode: "01:00:00:00",
-          videoTracks: 1,
-          audioTracks: 1,
-          subtitleTracks: 0,
-          settings: {}
-        },
+        timeline: mockTimelineSummary(timeline),
         timelineName: timeline.name,
-        tracks: {
-          video: [{ index: 1, itemCount: 0, items: [], truncated: false }],
-          audio: [{ index: 1, itemCount: 0, items: [], truncated: false }],
-          subtitle: []
-        },
+        tracks,
         markers: [],
-        emittedClips: 0,
+        emittedClips: timeline.items.length,
         truncated: false,
         timelines: state.timelines.map((item, index) => ({
           index: index + 1,
@@ -434,6 +502,246 @@ function handleMockCommand(
           binPath: binPath || null,
           currentFolderRestored: binPath !== ""
         }
+      };
+    }
+
+    case "timeline.create": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const rawName = typeof payloadRecord.name === "string" ? payloadRecord.name.trim() : "";
+      const hasName = payloadRecord.name !== undefined;
+      const name = hasName ? rawName : null;
+      if (name !== null && (name === "" || name.length > 120 || /[<>:"/\\|?*]/.test(name))) {
+        throw new MockCommandError("INVALID_TIMELINE_NAME", "Mock: invalid timeline name.");
+      }
+      const mediaIds = Array.isArray(payloadRecord.mediaIds)
+        ? payloadRecord.mediaIds.filter((item): item is string => typeof item === "string")
+        : [];
+      if (mediaIds.length > 100) {
+        throw new MockCommandError("TOO_MANY_MEDIA_IDS", "Mock: at most 100 media ids can be used per timeline create.");
+      }
+      const items: MockTimelineItem[] = [];
+      if (mediaIds.length > 0) {
+        const clips: MockClip[] = [];
+        const missing: string[] = [];
+        for (const mediaId of mediaIds) {
+          const clip = findMockClipByMediaId(state, mediaId);
+          if (clip) {
+            clips.push(clip);
+          } else {
+            missing.push(mediaId);
+          }
+        }
+        if (missing.length > 0) {
+          throw new MockCommandError("TIMELINE_CLIP_NOT_FOUND", `Mock: media ids not found: ${missing.join(", ")}`);
+        }
+        let start = 0;
+        for (const clip of clips) {
+          const duration = clip.frames > 0 ? clip.frames : 240;
+          const item: MockTimelineItem = {
+            name: clip.name,
+            start,
+            finish: start + duration,
+            duration,
+            trackType: "video",
+            trackIndex: 1,
+            properties: { mediaId: String(clip.mediaId) }
+          };
+          items.push(item);
+          start = item.finish;
+        }
+      }
+      const timelineName = name ?? "Timeline";
+      const timeline: MockTimeline = {
+        name: timelineName,
+        uniqueId: createMockId("tl", timelineName),
+        items
+      };
+      state.timelines.push(timeline);
+      state.currentTimelineName = timeline.name;
+      return {
+        ...base(),
+        timeline: mockTimelineSummary(timeline),
+        timelineName: timeline.name,
+        timelines: state.timelines.map((item, index) => ({
+          index: index + 1,
+          name: item.name,
+          uniqueId: item.uniqueId
+        })),
+        created: true
+      };
+    }
+
+    case "timeline.appendClips": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const timeline = mockCurrentTimeline(state);
+      if (!timeline) {
+        throw new MockCommandError("TIMELINE_UNAVAILABLE", "Mock: no current timeline is open.");
+      }
+      const mediaIds = Array.isArray(payloadRecord.mediaIds)
+        ? payloadRecord.mediaIds.filter((item): item is string => typeof item === "string")
+        : [];
+      if (mediaIds.length === 0) {
+        throw new MockCommandError("VALIDATION_ERROR", "Mock: mediaIds must be a non-empty array of clip ids.");
+      }
+      if (mediaIds.length > 100) {
+        throw new MockCommandError("TOO_MANY_MEDIA_IDS", "Mock: at most 100 media ids can be appended per request.");
+      }
+      const clips: MockClip[] = [];
+      const missing: string[] = [];
+      for (const mediaId of mediaIds) {
+        const clip = findMockClipByMediaId(state, mediaId);
+        if (clip) {
+          clips.push(clip);
+        } else {
+          missing.push(mediaId);
+        }
+      }
+      if (missing.length > 0) {
+        throw new MockCommandError("TIMELINE_CLIP_NOT_FOUND", `Mock: media ids not found: ${missing.join(", ")}`);
+      }
+      const lastFinish = timeline.items.reduce((max, item) => Math.max(max, item.finish), 0);
+      const appendedItems: MockTimelineItem[] = [];
+      let start = lastFinish;
+      for (const clip of clips) {
+        const duration = clip.frames > 0 ? clip.frames : 240;
+        const item: MockTimelineItem = {
+          name: clip.name,
+          start,
+          finish: start + duration,
+          duration,
+          trackType: "video",
+          trackIndex: 1,
+          properties: { mediaId: String(clip.mediaId) }
+        };
+        timeline.items.push(item);
+        appendedItems.push({ ...item });
+        start = item.finish;
+      }
+      return {
+        ...base(),
+        appended: {
+          count: appendedItems.length,
+          items: appendedItems,
+          timelineName: timeline.name
+        }
+      };
+    }
+
+    case "timeline.deleteClips": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const timeline = mockCurrentTimeline(state);
+      if (!timeline) {
+        throw new MockCommandError("TIMELINE_UNAVAILABLE", "Mock: no current timeline is open.");
+      }
+      const targets = Array.isArray(payloadRecord.targets) ? payloadRecord.targets : [];
+      if (targets.length === 0) {
+        throw new MockCommandError("VALIDATION_ERROR", "Mock: targets must be a non-empty array of delete targets.");
+      }
+      const sorted = [...timeline.items].sort((left, right) => left.start - right.start);
+      const deletedKeys = new Set<string>();
+      let deleted = 0;
+      for (const target of targets) {
+        const trackType = String((target as { trackType?: unknown }).trackType ?? "");
+        const trackIndex = Number((target as { trackIndex?: unknown }).trackIndex);
+        const itemIndices = Array.isArray((target as { itemIndices?: unknown }).itemIndices)
+          ? (target as { itemIndices: unknown[] }).itemIndices
+          : [];
+        if (!["video", "audio", "subtitle"].includes(trackType) || !Number.isInteger(trackIndex) || trackIndex < 1) {
+          throw new MockCommandError("VALIDATION_ERROR", "Mock: invalid delete target.");
+        }
+        const groupKey = `${trackType}:${trackIndex}`;
+        const groupItems = sorted.filter(
+          (item) => `${item.trackType}:${item.trackIndex}` === groupKey
+        );
+        for (const rawItemIndex of itemIndices) {
+          const itemIndex = Number(rawItemIndex);
+          if (!Number.isInteger(itemIndex) || itemIndex < 1) {
+            throw new MockCommandError("VALIDATION_ERROR", "Mock: invalid itemIndex in delete target.");
+          }
+          const position = itemIndex - 1;
+          if (position < 0 || position >= groupItems.length) {
+            throw new MockCommandError(
+              "TIMELINE_ITEM_NOT_FOUND",
+              `Mock: timeline item not found: ${trackType} track ${trackIndex} item ${itemIndex}`
+            );
+          }
+          const key = `${groupKey}#${position}`;
+          if (!deletedKeys.has(key)) {
+            deletedKeys.add(key);
+            deleted += 1;
+          }
+        }
+      }
+      const kept: MockTimelineItem[] = [];
+      const groupCounters = new Map<string, number>();
+      for (const item of sorted) {
+        const groupKey = `${item.trackType}:${item.trackIndex}`;
+        const position = groupCounters.get(groupKey) ?? 0;
+        groupCounters.set(groupKey, position + 1);
+        if (deletedKeys.has(`${groupKey}#${position}`)) {
+          continue;
+        }
+        kept.push(item);
+      }
+      timeline.items = kept;
+      return {
+        ...base(),
+        deleted: { count: deleted }
+      };
+    }
+
+    case "timeline.setItemProperty": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const timeline = mockCurrentTimeline(state);
+      if (!timeline) {
+        throw new MockCommandError("TIMELINE_UNAVAILABLE", "Mock: no current timeline is open.");
+      }
+      const target = (payloadRecord.target ?? {}) as Record<string, unknown>;
+      const trackType = typeof target.trackType === "string" ? target.trackType : "";
+      const trackIndex = typeof target.trackIndex === "number" ? target.trackIndex : 0;
+      const itemIndex = typeof target.itemIndex === "number" ? target.itemIndex : 0;
+      const properties = (payloadRecord.properties ?? {}) as Record<string, string | number | boolean>;
+      const propertyKeys = Object.keys(properties);
+      if (!["video", "audio", "subtitle"].includes(trackType) || trackIndex < 1 || itemIndex < 1) {
+        throw new MockCommandError("VALIDATION_ERROR", "Mock: invalid timeline item target.");
+      }
+      if (propertyKeys.length === 0 || propertyKeys.length > 20) {
+        throw new MockCommandError("VALIDATION_ERROR", "Mock: provide between 1 and 20 properties.");
+      }
+      const sorted = [...timeline.items].sort((left, right) => left.start - right.start);
+      const groupItems = sorted.filter(
+        (item) => item.trackType === trackType && item.trackIndex === trackIndex
+      );
+      const item = groupItems[itemIndex - 1];
+      if (!item) {
+        throw new MockCommandError("TIMELINE_ITEM_NOT_FOUND", `Mock: timeline item not found: ${trackType} track ${trackIndex} item ${itemIndex}`);
+      }
+      const applied: Array<{ key: string; applied: boolean }> = [];
+      for (const [key, value] of Object.entries(properties)) {
+        item.properties[key] = value;
+        applied.push({ key, applied: true });
+      }
+      return {
+        ...base(),
+        item: {
+          name: item.name,
+          start: item.start,
+          finish: item.finish,
+          duration: item.duration,
+          trackType: item.trackType,
+          trackIndex: item.trackIndex
+        },
+        applied,
+        itemIndex,
+        target: { trackType, trackIndex, itemIndex }
       };
     }
 

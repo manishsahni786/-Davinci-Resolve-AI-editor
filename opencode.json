@@ -1,12 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "default_agent": "opencode-davinci",
+  "instructions": ["AGENTS.md"],
   "mcp": {
     "ai-video-editor": {
       "type": "local",
       "command": ["node", "dist/mcp-server.js"],
       "enabled": true,
       "environment": {
-        "AVE_LOG_LEVEL": "info"
+        "AVE_LOG_LEVEL": "info",
+        "AVE_AUTO_TRIGGER": "false"
       }
     }
   }

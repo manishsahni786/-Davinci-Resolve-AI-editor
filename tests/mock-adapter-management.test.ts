@@ -131,6 +131,85 @@ describe("Mock Resolve management commands", () => {
     ).rejects.toThrow();
   });
 
+  it("creates timelines, appends clips, sets properties and deletes items", async () => {
+    await startAdapter();
+
+    const importResult = await manager.execute(
+      "media.import",
+      { filePaths: ["C:/Media/a.mp4", "C:/Media/b.mp4"] },
+      { timeoutMs: 2000 }
+    );
+    expect(importResult.response.ok).toBe(true);
+    const imported = (importResult.response.result as Record<string, unknown>).imported as {
+      clips: Array<{ uniqueId: string }>;
+    };
+    const mediaIds = imported.clips.map((clip) => clip.uniqueId);
+
+    const created = await manager.execute(
+      "timeline.create",
+      { name: "Milestone 5 Reel", mediaIds: [mediaIds[0]] },
+      { timeoutMs: 2000 }
+    );
+    expect(created.response.ok).toBe(true);
+    expect((created.response.result as Record<string, unknown>).timelineName).toBe("Milestone 5 Reel");
+
+    const appended = await manager.execute(
+      "timeline.appendClips",
+      { mediaIds: [mediaIds[1]] },
+      { timeoutMs: 2000 }
+    );
+    expect(appended.response.ok).toBe(true);
+    expect(((appended.response.result as Record<string, unknown>).appended as { count: number }).count).toBe(1);
+
+    const setProperty = await manager.execute(
+      "timeline.setItemProperty",
+      {
+        target: { trackType: "video", trackIndex: 1, itemIndex: 1 },
+        properties: { Color: "Blue" }
+      },
+      { timeoutMs: 2000 }
+    );
+    expect(setProperty.response.ok).toBe(true);
+    expect(((setProperty.response.result as Record<string, unknown>).applied as Array<{ key: string }>)).toEqual([
+      { key: "Color", applied: true }
+    ]);
+
+    const deleted = await manager.execute(
+      "timeline.deleteClips",
+      { targets: [{ trackType: "video", trackIndex: 1, itemIndices: [2] }] },
+      { timeoutMs: 2000 }
+    );
+    expect(deleted.response.ok).toBe(true);
+    expect(((deleted.response.result as Record<string, unknown>).deleted as { count: number }).count).toBe(1);
+
+    const missing = await manager.execute(
+      "timeline.deleteClips",
+      { targets: [{ trackType: "video", trackIndex: 1, itemIndices: [9] }] },
+      { timeoutMs: 2000 }
+    );
+    expect(missing.response.ok).toBe(false);
+    expect(missing.response.error?.code).toBe("TIMELINE_ITEM_NOT_FOUND");
+  });
+
+  it("rejects unknown media ids when creating or appending timeline clips", async () => {
+    await startAdapter();
+    const created = await manager.execute(
+      "timeline.create",
+      { name: "Missing Clip Timeline", mediaIds: ["missing-clip"] },
+      { timeoutMs: 2000 }
+    );
+    expect(created.response.ok).toBe(false);
+    expect(created.response.error?.code).toBe("TIMELINE_CLIP_NOT_FOUND");
+
+    const appended = await manager.execute(
+      "timeline.appendClips",
+      { mediaIds: ["missing-clip"] },
+      { timeoutMs: 2000 }
+    );
+    expect(appended.response.ok).toBe(false);
+    expect(appended.response.error?.code).toBe("TIMELINE_CLIP_NOT_FOUND");
+  });
+
   it("reports unsupported commands honestly", async () => {
     await startAdapter();
     const response = await bridge.send(createRequest("milestone6.render"), { timeoutMs: 2000 });

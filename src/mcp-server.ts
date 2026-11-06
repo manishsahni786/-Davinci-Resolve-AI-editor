@@ -4,6 +4,7 @@ import { loadSettings } from "./config/settings.js";
 import { FileBridge } from "./bridge/file-bridge.js";
 import { BridgeManager } from "./bridge/bridge-manager.js";
 import { FusionPrefsChannel } from "./bridge/fusion-prefs.js";
+import { ResolveTrigger } from "./bridge/resolve-trigger.js";
 import { ResolveClient } from "./resolve/resolve-client.js";
 import { Logger } from "./utils/logger.js";
 import { toAppError } from "./utils/errors.js";
@@ -22,10 +23,12 @@ async function main(): Promise<void> {
     logger.child({ component: "fusion-prefs" }),
     settings.pollIntervalMs
   );
+  const trigger = new ResolveTrigger(settings, logger.child({ component: "resolve-trigger" }));
   const bridge = new FileBridge(
     settings,
     logger.child({ component: "file-bridge" }),
-    prefsChannel
+    prefsChannel,
+    trigger
   );
   const manager = new BridgeManager(bridge, logger.child({ component: "bridge-manager" }));
   const client = new ResolveClient(
@@ -43,6 +46,7 @@ async function main(): Promise<void> {
     manager,
     resolve: client,
     prefsChannel,
+    trigger,
     logger
   });
   const transport = new StdioServerTransport();

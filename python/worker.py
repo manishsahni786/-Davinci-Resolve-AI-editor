@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Independent Python media worker.
-
-Protocol: one JSON object per line on stdin, one JSON object per line on stdout.
-This Milestone 1 worker only implements ping, env_info and shutdown. Media
-analysis commands will be added in later milestones without changing the pipe
-protocol.
-"""
+"""Independent JSON-lines worker for media discovery and bounded analysis."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import platform
 import shutil
 import sys
 import traceback
 from typing import Any
+
+import media_analysis
 
 
 PROTOCOL_VERSION = "1.0"
@@ -48,6 +45,14 @@ def env_info() -> dict[str, Any]:
             "whisper": installed("whisper"),
             "imageio_ffmpeg": installed("imageio_ffmpeg"),
         },
+        "visionModelConfigured": bool(os.environ.get("AVE_VISION_BASE_URL") and os.environ.get("AVE_VISION_MODEL")),
+        "vision": {
+            "configured": bool(os.environ.get("AVE_VISION_BASE_URL") and os.environ.get("AVE_VISION_MODEL")),
+            "apiStyle": os.environ.get("AVE_VISION_API_STYLE", ""),
+            "baseUrl": os.environ.get("AVE_VISION_BASE_URL", ""),
+            "model": os.environ.get("AVE_VISION_MODEL", ""),
+        },
+        "localWhisperModelConfigured": bool(os.environ.get("AVE_WHISPER_MODEL_PATH")),
     }
 
 
@@ -74,12 +79,36 @@ def handle(request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         return make_response(request, "success", env_info()), False
     if command == "shutdown":
         return make_response(request, "success", {"message": "shutting down"}), True
+    payload = request.get("payload", {})
+    if not isinstance(payload, dict):
+        return make_response(request, "error", error={"code": "INVALID_PAYLOAD", "message": "payload must be a JSON object"}), False
+    analysis_commands = {
+        "probe_media": media_analysis.probe_media,
+        "discover_media": media_analysis.discover_media,
+        "detect_scenes": media_analysis.detect_scenes,
+        "sample_frames": media_analysis.sample_frames,
+        "detect_silence": media_analysis.detect_silence,
+        "transcribe": media_analysis.transcribe,
+        "analyze_media": media_analysis.analyze_media,
+        "analyze_events": media_analysis.analyze_events,
+    }
+    if command in analysis_commands:
+        try:
+            if isinstance(request.get("id"), str) and request["id"].strip() and "jobId" not in payload:
+                payload = dict(payload)
+                payload["jobId"] = request["id"].strip()
+            return make_response(request, "success", analysis_commands[command](payload)), False
+        except media_analysis.MediaAnalysisError as exception:
+            error: dict[str, Any] = {"code": exception.code, "message": str(exception)}
+            if exception.details is not None:
+                error["details"] = exception.details
+            return make_response(request, "error", error=error), False
     return make_response(
         request,
         "unsupported",
         error={
             "code": "UNSUPPORTED_COMMAND",
-            "message": f"Command is not implemented in Milestone 1: {command}",
+            "message": f"Command is not implemented: {command}",
         },
     ), False
 

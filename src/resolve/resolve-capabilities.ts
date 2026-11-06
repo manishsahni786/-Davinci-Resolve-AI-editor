@@ -34,7 +34,16 @@ const CAPABILITIES: Capability[] = [
     implemented: true,
     milestone: "1",
     evidence: "Live request eb8dbb32-2abf-4881-ba3a-e0ea608900e5 was processed by the Bridge menu and returned ok: true, resolveConnected: true, version 21.1.0.17.",
-    notes: "Node writes next.request.json and next.request.lua. Lua reads the request with loadfile and publishes the response through Fusion prefs because io is unavailable. Processed ids are retained for idempotent replay, and early transport failures are published through Fusion prefs. Manual menu trigger is still required."
+    notes: "Node writes next.request.json and next.request.lua. Lua reads the request with loadfile and publishes the response through Fusion prefs because io is unavailable. Processed ids are retained for idempotent replay, and early transport failures are published through Fusion prefs. The user launches the menu item manually for each request; optional UI Automation is disabled by default."
+  },
+  {
+    id: "bridge.auto-trigger",
+    name: "Automatic Scripts-menu bridge trigger (no manual click)",
+    status: "verified",
+    implemented: true,
+    milestone: "5",
+    evidence: "Verified live on 2026-11-03 with Resolve Free 21.1.0.17: resolve-scripts/invoke-bridge.ps1 invokes Workspace > Scripts > AI Video Editor Bridge through UI Automation; npm run resolve:test returned SUCCESS and all four Milestone 5 timeline commands ran without a click.",
+    notes: "UI Automation is a Windows-only transport shim, not external Resolve scripting. It works while the Resolve UI is running. If Resolve is closed, the trigger reports RESOLVE_NOT_RUNNING and the request stays queued."
   },
   {
     id: "resolve.inspection-readonly",
@@ -51,8 +60,8 @@ const CAPABILITIES: Capability[] = [
     status: "verified",
     implemented: true,
     milestone: "3",
-    evidence: "A real MCP SDK client completed a stdio handshake with dist/mcp-server.js and listed 9 tools; 6 MCP tests cover discovery, capability output, queueing, waiting, response reading and clearing.",
-    notes: "Inspection tools queue by default because every Resolve request still needs the manual Bridge menu trigger. No editing tools are exposed in Milestone 3."
+    evidence: "A real MCP SDK client completed a stdio handshake with dist/mcp-server.js; MCP tests cover discovery, capability output, queueing, waiting, response reading, clearing, management and timeline-editing tools (19 tools total).",
+    notes: "Tools queue and return request ids by default. The user launches the Bridge menu in Resolve, then reads each response by id."
   },
   {
     id: "bridge.background-polling",
@@ -61,7 +70,7 @@ const CAPABILITIES: Capability[] = [
     implemented: false,
     milestone: "1",
     evidence: "Resolve executes menu Lua scripts synchronously on the UI thread; no supported idle/background callback was found in the 21.1 scripting API.",
-    notes: "A loop would freeze the Resolve UI. The bridge therefore uses a manually triggered processor."
+    notes: "A loop would freeze the Resolve UI. The bridge therefore runs one request per invocation, launched manually from Resolve's Workspace > Scripts menu."
   },
   {
     id: "bridge.mock-adapter",
@@ -96,16 +105,25 @@ const CAPABILITIES: Capability[] = [
     implemented: true,
     milestone: "4",
     evidence: "MockResolveAdapter implements the full bridge command set with in-memory project/bin/clip state and unit tests cover success and failure paths.",
-    notes: "No Resolve required; results are simulated and never presented as live evidence."
+    notes: "No Resolve required; results are simulated and never presented as live evidence. Covers the mock execution of inspection, management and timeline editing commands with in-memory project/bin/clip/timeline state."
   },
   {
     id: "resolve.timeline-editing",
     name: "Timeline creation and clip manipulation",
-    status: "supported-untested",
-    implemented: false,
+    status: "verified",
+    implemented: true,
     milestone: "5",
-    evidence: "MediaPool.CreateEmptyTimeline/CreateTimelineFromClips, Timeline.DeleteClips, TimelineItem.SetProperties and TimelineItem.AddTransition exist in the 21.1 API definition.",
-    notes: "AddTransition is new in 21.1 and must be verified in Free."
+    evidence: "All four commands verified live in Resolve Free 21.1.0.17 on 2026-11-03 with automatic menu triggering: timeline.create, timeline.appendClips (1 item), timeline.setItemProperty (Clip Color = Blue, applied: true) and timeline.deleteClips (1 item removed) each returned ok: true.",
+    notes: "timeline.setItemProperty maps Clip Color/Clip Name to SetClipColor/SetName and batches other keys through TimelineItem.SetProperties; TimelineItem has no SetProperty method. Whole-clip create/append/delete/set-property only. Trimmed in/out append (startFrame/endFrame clipInfo) and transitions are not yet exposed."
+  },
+  {
+    id: "resolve.editing-workflow",
+    name: "High-level reel assembly workflow",
+    status: "verified",
+    implemented: true,
+    milestone: "5",
+    evidence: "npm run reel created AIVE Reel Workflow Test from the existing media pool on 2026-11-03: project reuse, media inspection, topic clip selection, timeline.create and project.save all returned ok: true.",
+    notes: "Assembles a rough cut from whole clips selected by topic token or clip ids. It does not trim clips, add transitions, mix audio, render, or enforce Instagram 9:16 / YouTube 16:9 project settings yet; those remain later milestones."
   },
   {
     id: "resolve.render-h264-mp4",

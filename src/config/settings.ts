@@ -23,6 +23,9 @@ export interface AppSettings {
   fusionPrefsPath: string;
   commandTimeoutMs: number;
   pollIntervalMs: number;
+  autoTrigger: boolean;
+  autoTriggerIntervalMs: number;
+  autoTriggerScriptPath: string;
   logLevel: LogLevel;
 }
 
@@ -33,6 +36,9 @@ interface SettingsFile {
   fusionPrefsPath?: string;
   commandTimeoutMs?: number;
   pollIntervalMs?: number;
+  autoTrigger?: boolean;
+  autoTriggerIntervalMs?: number;
+  autoTriggerScriptPath?: string;
   logLevel?: LogLevel;
 }
 
@@ -101,6 +107,20 @@ function resolveConfiguredPath(value: string | undefined, base: string): string 
   return path.isAbsolute(value) ? path.normalize(value) : path.resolve(base, value);
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  throw new ValidationError(`Invalid boolean value "${value}". Use true or false.`);
+}
+
 export function loadSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   loadDotEnv(path.join(PROJECT_ROOT, ".env"));
   const fileSettings = readSettingsFile(path.join(PROJECT_ROOT, "config", "settings.json"));
@@ -147,6 +167,23 @@ export function loadSettings(overrides: Partial<AppSettings> = {}): AppSettings 
       fileSettings.pollIntervalMs ?? 500
     );
 
+  const autoTrigger = overrides.autoTrigger
+    ?? parseBoolean(
+      process.env.AVE_AUTO_TRIGGER,
+      fileSettings.autoTrigger ?? false
+    );
+
+  const autoTriggerIntervalMs = overrides.autoTriggerIntervalMs
+    ?? parsePositiveInteger(
+      process.env.AVE_AUTO_TRIGGER_INTERVAL_MS,
+      fileSettings.autoTriggerIntervalMs ?? 1_500
+    );
+
+  const autoTriggerScriptPath = overrides.autoTriggerScriptPath
+    ?? resolveConfiguredPath(process.env.AVE_AUTO_TRIGGER_SCRIPT, PROJECT_ROOT)
+    ?? resolveConfiguredPath(fileSettings.autoTriggerScriptPath, PROJECT_ROOT)
+    ?? path.join(PROJECT_ROOT, "resolve-scripts", "invoke-bridge.ps1");
+
   const logLevel = overrides.logLevel
     ?? parseLogLevel(process.env.AVE_LOG_LEVEL, fileSettings.logLevel ?? "info");
 
@@ -161,6 +198,9 @@ export function loadSettings(overrides: Partial<AppSettings> = {}): AppSettings 
     fusionPrefsPath,
     commandTimeoutMs,
     pollIntervalMs,
+    autoTrigger,
+    autoTriggerIntervalMs,
+    autoTriggerScriptPath,
     logLevel
   };
 }

@@ -5,12 +5,14 @@ import { getEnvironmentSnapshot } from "./config/environment.js";
 import { FileBridge } from "./bridge/file-bridge.js";
 import { BridgeManager } from "./bridge/bridge-manager.js";
 import { FusionPrefsChannel } from "./bridge/fusion-prefs.js";
+import { ResolveTrigger } from "./bridge/resolve-trigger.js";
 import {
   createRequest,
   isKnownBridgeCommand,
   type BridgeCommand
 } from "./bridge/message-protocol.js";
 import { ResolveClient } from "./resolve/resolve-client.js";
+import type { ReelWorkflowInput } from "./resolve/editing-workflow.js";
 import { listCapabilities, summarizeCapabilities } from "./resolve/resolve-capabilities.js";
 import { MockResolveAdapter } from "./resolve/mock-resolve-adapter.js";
 import { Logger } from "./utils/logger.js";
@@ -19,7 +21,7 @@ import { assertRequestId } from "./utils/validation.js";
 import { writeTextFileAtomic } from "./utils/file-utils.js";
 
 const HELP = `
-AI Video Editor - Milestone 4 (Resolve inspection and project/media management)
+AI Video Editor - Milestone 5 (Resolve inspection, project/media management and timeline editing)
 
 Usage:
   npm run status                 Show environment, bridge and capability status.
@@ -32,6 +34,14 @@ Usage:
   npm run resolve:project        Inspect the current project.
   npm run resolve:media          Inspect the media pool.
   npm run resolve:timeline       Inspect the current timeline.
+  npm run resolve:timeline-create -- "<name>" [--media-ids=<id,id>]
+                                 Create a timeline, optionally from media ids.
+  npm run resolve:timeline-append -- <mediaId> [<mediaId>...]
+                                 Append media ids to the current timeline.
+  npm run resolve:timeline-delete -- <trackType> <trackIndex> <itemIndex>...
+                                 Delete timeline items.
+  npm run resolve:timeline-set-property -- <trackType> <trackIndex> <itemIndex> --key=<key> [--value=<value>]
+                                 Set a property on a timeline item.
   npm run resolve:render         Inspect render formats, codecs and presets.
   npm run resolve:project-create -- "<name>" [--media-path=<path>]
                                  Create and open a new project.
@@ -42,6 +52,10 @@ Usage:
                                  Create a media pool bin.
   npm run resolve:media-import -- <path> [<path>...] [--bin=<bin/path>]
                                  Import media into the current or target bin.
+  npm run reel -- [--project=<name>] [--media=<path,path>] [--topic=<words>]
+                 [--platform=instagram|youtube] [--clip-ids=<id,id>]
+                 [--timeline=<name>] [--bin=<name>] [--max-clips=<n>] [--no-save]
+                                 Build a whole-clip rough cut; launch Bridge for each request.
   npm run resolve:diagnostics    Read the report published by the Diagnostics menu item.
   npm run resolve:clear          Archive a pending request without processing it.
   npm run resolve:mock           Run a mock Resolve adapter (no Resolve required).
@@ -52,12 +66,16 @@ Inspection commands:
 Management commands:
   project.create, project.open, project.save, media.createBin, media.import
 
+Timeline editing commands:
+  timeline.create, timeline.appendClips, timeline.deleteClips, timeline.setItemProperty
+
 Options:
   --timeout-ms=<number>          Override the bridge wait timeout.
 
 Important:
-  DaVinci Resolve Free does not allow external scripting. After queueing a request,
-  run in Resolve: Workspace > Scripts > Utility > AI Video Editor Bridge.
+  DaVinci Resolve Free does not allow external scripting. Commands are executed by
+  manually launching Workspace > Scripts > Utility > AI Video Editor Bridge for
+  each request. Optional Windows UI automation is disabled by default.
 `.trim();
 
 function parseTimeout(args: string[]): number | undefined {
@@ -109,7 +127,8 @@ async function main(): Promise<number> {
     logger.child({ component: "fusion-prefs" }),
     settings.pollIntervalMs
   );
-  const bridge = new FileBridge(settings, bridgeLogger, prefsChannel);
+  const trigger = new ResolveTrigger(settings, logger.child({ component: "resolve-trigger" }));
+  const bridge = new FileBridge(settings, bridgeLogger, prefsChannel, trigger);
   const manager = new BridgeManager(bridge, logger.child({ component: "bridge-manager" }));
   const client = new ResolveClient(settings, manager, bridge, logger.child({ component: "resolve-client" }));
 
@@ -145,7 +164,7 @@ async function main(): Promise<number> {
       const requestedCommand = args.slice(1).find((arg) => !arg.startsWith("--")) ?? "diagnostics.ping";
       if (!isKnownBridgeCommand(requestedCommand)) {
         console.error(`Unknown bridge command: ${requestedCommand}`);
-        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect, project.create, project.open, project.save, media.createBin, media.import");
+        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect, project.create, project.open, project.save, media.createBin, media.import, timeline.create, timeline.appendClips, timeline.deleteClips, timeline.setItemProperty");
         return 1;
       }
       const request = createRequest(requestedCommand, {
@@ -157,7 +176,10 @@ async function main(): Promise<number> {
         command: request.command,
         requestId: request.id,
         requestPath: bridge.requestFilePath,
-        nextStep: "In Resolve: Workspace > Scripts > Utility > AI Video Editor Bridge"
+        autoTrigger: trigger.enabled,
+        nextStep: trigger.enabled
+          ? "The bridge is triggered automatically when you wait for the response."
+          : "In Resolve: Workspace > Scripts > Utility > AI Video Editor Bridge"
       }, null, 2));
       return 0;
     }
@@ -227,6 +249,86 @@ async function main(): Promise<number> {
         ...(binPath !== undefined ? { binPath } : {})
       });
     }
+    case "timeline-create": {
+      const name = positionalArgs(args)[0];
+      const mediaIdsValue = optionValue(args, "media-ids");
+      const mediaIds = mediaIdsValue
+        ? mediaIdsValue.split(",").map((id) => id.trim()).filter((id) => id !== "")
+        : [];
+      if (!name && mediaIds.length === 0) {
+        console.error('Usage: npm run resolve:timeline-create -- "<name>" [--media-ids=<id,id>]');
+        return 1;
+      }
+      const payload: Record<string, unknown> = {
+        ...(name !== undefined ? { name } : {}),
+        ...(mediaIds.length > 0 ? { mediaIds } : {})
+      };
+      return await runManagementCommand("timeline.create", payload);
+    }
+    case "timeline-append": {
+      const mediaIds = positionalArgs(args);
+      if (mediaIds.length === 0) {
+        console.error("Usage: npm run resolve:timeline-append -- <mediaId> [<mediaId>...]");
+        return 1;
+      }
+      return await runManagementCommand("timeline.appendClips", { mediaIds });
+    }
+    case "timeline-delete": {
+      const positionals = positionalArgs(args);
+      if (positionals.length < 3) {
+        console.error("Usage: npm run resolve:timeline-delete -- <trackType> <trackIndex> <itemIndex>...");
+        return 1;
+      }
+      const trackType = positionals[0];
+      const trackIndex = Number(positionals[1]);
+      const itemIndices = positionals.slice(2).map((value) => Number(value));
+      if (
+        !(trackType === "video" || trackType === "audio" || trackType === "subtitle")
+        || !Number.isInteger(trackIndex) || trackIndex < 1 || trackIndex > 100
+        || itemIndices.length === 0
+        || itemIndices.some((value) => !Number.isInteger(value) || value < 1 || value > 500)
+      ) {
+        console.error("Invalid timeline delete target. Use: <trackType> <trackIndex> <itemIndex>...");
+        return 1;
+      }
+      return await runManagementCommand("timeline.deleteClips", {
+        targets: [{ trackType, trackIndex, itemIndices }]
+      });
+    }
+    case "timeline-set-property": {
+      const positionals = positionalArgs(args);
+      const trackType = positionals[0];
+      const trackIndex = Number(positionals[1]);
+      const itemIndex = Number(positionals[2]);
+      const key = optionValue(args, "key");
+      const rawValue = optionValue(args, "value");
+      let value: string | number | boolean = true;
+      const trimmedValue = rawValue?.trim();
+      if (trimmedValue !== undefined && trimmedValue !== "") {
+        if (/^true$/i.test(trimmedValue)) {
+          value = true;
+        } else if (/^false$/i.test(trimmedValue)) {
+          value = false;
+        } else if (/^-?\d+(\.\d+)?$/.test(trimmedValue)) {
+          value = Number(trimmedValue);
+        } else {
+          value = trimmedValue;
+        }
+      }
+      if (
+        !(trackType === "video" || trackType === "audio" || trackType === "subtitle")
+        || !Number.isInteger(trackIndex) || trackIndex < 1 || trackIndex > 100
+        || !Number.isInteger(itemIndex) || itemIndex < 1 || itemIndex > 500
+        || !key
+      ) {
+        console.error('Usage: npm run resolve:timeline-set-property -- <trackType> <trackIndex> <itemIndex> --key=<key> [--value=<value>]');
+        return 1;
+      }
+      return await runManagementCommand("timeline.setItemProperty", {
+        target: { trackType, trackIndex, itemIndex },
+        properties: { [key]: value }
+      });
+    }
     case "resolve-diagnostics": {
       const diagnostics = await prefsChannel.readDiagnostics();
       if (!diagnostics) {
@@ -238,6 +340,51 @@ async function main(): Promise<number> {
       await writeTextFileAtomic(target, `${JSON.stringify(diagnostics, null, 2)}\n`);
       console.log(JSON.stringify({ writtenTo: target, diagnostics }, null, 2));
       return 0;
+    }
+    case "reel": {
+      const mediaValue = optionValue(args, "media");
+      const clipIdsValue = optionValue(args, "clip-ids");
+      const maxClipsValue = optionValue(args, "max-clips");
+      const platformValue = optionValue(args, "platform");
+      if (
+        platformValue !== undefined
+        && platformValue !== "instagram"
+        && platformValue !== "youtube"
+      ) {
+        console.error("Invalid --platform value. Use instagram or youtube.");
+        return 1;
+      }
+      const maxClips = maxClipsValue === undefined ? undefined : Number(maxClipsValue);
+      if (
+        maxClips !== undefined
+        && (!Number.isInteger(maxClips) || maxClips < 1 || maxClips > 100)
+      ) {
+        console.error("Invalid --max-clips value. Use an integer from 1 to 100.");
+        return 1;
+      }
+
+      const input: ReelWorkflowInput = {};
+      const projectName = optionValue(args, "project");
+      if (projectName !== undefined) input.projectName = projectName;
+      if (mediaValue !== undefined) {
+        input.mediaPaths = mediaValue.split(",").map((value) => value.trim()).filter((value) => value !== "");
+      }
+      const binName = optionValue(args, "bin");
+      if (binName !== undefined) input.binName = binName;
+      if (clipIdsValue !== undefined) {
+        input.clipIds = clipIdsValue.split(",").map((value) => value.trim()).filter((value) => value !== "");
+      }
+      const timelineName = optionValue(args, "timeline");
+      if (timelineName !== undefined) input.timelineName = timelineName;
+      const topic = optionValue(args, "topic");
+      if (topic !== undefined) input.topic = topic;
+      if (platformValue !== undefined) input.platform = platformValue;
+      if (maxClips !== undefined) input.maxClips = maxClips;
+      if (args.includes("--no-save")) input.save = false;
+
+      const result = await client.makeReel(input, timeoutOverride ?? settings.commandTimeoutMs);
+      console.log(JSON.stringify(result, null, 2));
+      return result.ok ? 0 : 1;
     }
     case "read": {
       const requestId = args[1];
@@ -298,8 +445,12 @@ async function main(): Promise<number> {
     await bridge.enqueue(request);
 
     console.log(`Queued ${command} as ${request.id}`);
-    console.log("ACTION REQUIRED in DaVinci Resolve:");
-    console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    if (trigger.enabled) {
+      console.log("Auto-triggering the Resolve bridge (no manual click required).");
+    } else {
+      console.log("ACTION REQUIRED in DaVinci Resolve:");
+      console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    }
     console.log(`Waiting up to ${Math.round(timeoutMs / 1000)} seconds...`);
 
     try {
@@ -308,7 +459,9 @@ async function main(): Promise<number> {
       return response.status === "success" ? 0 : 1;
     } catch (error) {
       if (error instanceof BridgeTimeoutError) {
-        console.error("NO RESPONSE - manual Lua trigger still required.");
+        console.error(trigger.enabled
+          ? "NO RESPONSE - the automatic Resolve trigger did not complete the request."
+          : "NO RESPONSE - manual Lua trigger still required.");
         console.error(error.message);
         console.error(JSON.stringify({ requestId: request.id, details: error.details }, null, 2));
         return error.exitCode;
@@ -324,8 +477,12 @@ async function main(): Promise<number> {
     const timeoutMs = timeoutOverride ?? settings.commandTimeoutMs;
     const request = await manager.enqueueOnly(command, payload, { timeoutMs });
     console.log(`Queued ${command} as ${request.id}`);
-    console.log("ACTION REQUIRED in DaVinci Resolve:");
-    console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    if (trigger.enabled) {
+      console.log("Auto-triggering the Resolve bridge (no manual click required).");
+    } else {
+      console.log("ACTION REQUIRED in DaVinci Resolve:");
+      console.log("  Workspace > Scripts > Utility > AI Video Editor Bridge");
+    }
     console.log(`Waiting up to ${Math.round(timeoutMs / 1000)} seconds...`);
 
     try {
@@ -334,7 +491,9 @@ async function main(): Promise<number> {
       return response.status === "success" ? 0 : 1;
     } catch (error) {
       if (error instanceof BridgeTimeoutError) {
-        console.error("NO RESPONSE - manual Lua trigger still required.");
+        console.error(trigger.enabled
+          ? "NO RESPONSE - the automatic Resolve trigger did not complete the request."
+          : "NO RESPONSE - manual Lua trigger still required.");
         console.error(error.message);
         console.error(JSON.stringify({ requestId: request.id, details: error.details }, null, 2));
         return error.exitCode;
@@ -369,8 +528,12 @@ async function main(): Promise<number> {
     console.log(`1. Queued request ${request.id}`);
     console.log(`   ${bridge.requestFilePath}`);
     console.log("");
-    console.log("2. ACTION REQUIRED in DaVinci Resolve:");
-    console.log("   Workspace > Scripts > Utility > AI Video Editor Bridge");
+    if (trigger.enabled) {
+      console.log("2. Auto-triggering the Resolve bridge (no manual click required).");
+    } else {
+      console.log("2. ACTION REQUIRED in DaVinci Resolve:");
+      console.log("   Workspace > Scripts > Utility > AI Video Editor Bridge");
+    }
     console.log(`   Waiting up to ${Math.round(timeoutMs / 1000)} seconds for a response...`);
     console.log("");
 
@@ -400,7 +563,9 @@ async function main(): Promise<number> {
       return 0;
     } catch (error) {
       if (error instanceof BridgeTimeoutError) {
-        console.error("NO RESPONSE - manual Lua trigger still required.");
+        console.error(trigger.enabled
+          ? "NO RESPONSE - the automatic Resolve trigger did not complete the request."
+          : "NO RESPONSE - manual Lua trigger still required.");
         console.error(error.message);
         console.error(JSON.stringify({ requestId: request.id, details: error.details }, null, 2));
         return error.exitCode;
