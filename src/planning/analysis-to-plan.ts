@@ -88,7 +88,7 @@ export function createPlanDraftFromAnalysis(
     : options.maxEvents;
 
   const warnings: string[] = [
-    "Event boundaries come from model-reported analysis; timeline execution currently enforces whole clips only, so partial source intervals would be rejected until trimmed append is implemented."
+    "Event boundaries come from model-reported analysis and are converted to whole source frames at execution time; a moment shorter than one frame cannot be inserted, and boundary rounding can differ from the requested duration by up to one frame per segment."
   ];
   const clips: EditingPlanDraft["clips"] = [];
   let ignoredEvents = 0;

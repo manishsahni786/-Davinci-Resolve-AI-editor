@@ -142,6 +142,22 @@ export class ResolveClient {
     return response;
   }
 
+  async createTimelineFromRanges(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.createFromRanges", payload, { timeoutMs });
+    return response;
+  }
+
+  async appendRanges(
+    payload: Record<string, unknown>,
+    timeoutMs = this.settings.commandTimeoutMs
+  ): Promise<BridgeResponseEnvelope> {
+    const { response } = await this.manager.execute("timeline.appendRanges", payload, { timeoutMs });
+    return response;
+  }
+
   async deleteClips(
     payload: Record<string, unknown>,
     timeoutMs = this.settings.commandTimeoutMs

@@ -80,6 +80,18 @@ describe("resolve capability matrix", () => {
     expect(capability?.implemented).toBe(true);
   });
 
+  it("marks milestone 8 source-range editing as live-verified for single-track, multi-track and audio sequences", () => {
+    const capability = getCapability("resolve.source-range-editing");
+    expect(capability?.status).toBe("verified");
+    expect(capability?.implemented).toBe(true);
+    expect(capability?.milestone).toBe("8");
+    expect(capability?.evidence).toContain("timeline.createFromRanges");
+    expect(capability?.evidence).toContain("AIVE Range Live Test 2");
+    expect(capability?.evidence).toContain("AIVE Audio Range Test");
+    expect(capability?.notes).toContain("two-video-track and multi-source placement are live-verified");
+    expect(capability?.notes).toContain("AUDIO_APPEND_FAILED");
+  });
+
   it("returns a complete five-category summary", () => {
     const summary = summarizeCapabilities();
     expect(Object.keys(summary)).toHaveLength(5);

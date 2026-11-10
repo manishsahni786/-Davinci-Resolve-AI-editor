@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { BridgeManager } from "../src/bridge/bridge-manager.js";
@@ -585,7 +586,7 @@ describe("AI Video Editor MCP server", () => {
     expect(plan.status).toBe("draft");
     expect((plan.clips as Array<{ clipId: string; sourceStartSeconds: number; confidence: number }>)[0])
       .toMatchObject({ clipId: "event-1", sourceStartSeconds: 10.5, confidence: 0.7 });
-    expect((plan.warnings as string[]).some((line) => line.includes("whole clips only"))).toBe(true);
+    expect((plan.warnings as string[]).some((line) => line.includes("converted to whole source frames"))).toBe(true);
   });
 
   it("rejects plan creation from a malformed analysis result", async () => {
@@ -595,5 +596,113 @@ describe("AI Video Editor MCP server", () => {
       arguments: { analysis: { events: [] }, mediaId: "media-1" }
     });
     expect(result.isError).toBe(true);
+  });
+
+  it("queues frame-accurate source ranges and verifies the inserted clips", async () => {
+    const { client, bridge } = await createHarness();
+    const created = parseText(await client.callTool({
+      name: "resolve_create_editing_plan",
+      arguments: {
+        draft: {
+          request: { originalInstruction: "Build the 90 second acceptance reel." },
+          project: { timelineName: "Instagram Reel - Parkour and Combat", saveAfterExecution: false },
+          sources: [
+            { mediaId: "parkour", filename: "parkour.mp4", durationSeconds: 60, frameRate: 30 },
+            { mediaId: "frost", filename: "frosthandler.mp4", durationSeconds: 120, frameRate: 30 },
+            { mediaId: "rais", filename: "rais-thugs.mp4", durationSeconds: 90, frameRate: 30 }
+          ],
+          clips: [
+            {
+              clipId: "parkour-15s", sourceMediaId: "parkour", sourceStartSeconds: 0, sourceEndSeconds: 15,
+              timelineStartSeconds: 0, videoTrack: 1, description: "15 seconds of parkour.",
+              relevance: 0.9, confidence: 0.8, reason: "User-selected parkour interval.",
+              evidence: [{ kind: "user-selected", sourceTimeSeconds: 0, description: "User selected parkour." }]
+            },
+            {
+              clipId: "frost-35s", sourceMediaId: "frost", sourceStartSeconds: 10, sourceEndSeconds: 45,
+              timelineStartSeconds: 15, videoTrack: 1, description: "35 seconds of Frosthandler combat.",
+              relevance: 0.9, confidence: 0.8, reason: "User-selected combat interval.",
+              evidence: [{ kind: "user-selected", sourceTimeSeconds: 10, description: "User selected combat." }]
+            },
+            {
+              clipId: "rais-40s", sourceMediaId: "rais", sourceStartSeconds: 5, sourceEndSeconds: 45,
+              timelineStartSeconds: 50, videoTrack: 1, description: "40 seconds of Rais and thugs.",
+              relevance: 0.9, confidence: 0.8, reason: "User-selected thug interval.",
+              evidence: [{ kind: "user-selected", sourceTimeSeconds: 5, description: "User selected thugs." }]
+            }
+          ],
+          requestedDurationSeconds: 90,
+          plannedDurationSeconds: 90,
+          output: { frameRate: 30 }
+        }
+      }
+    }));
+    const planId = String(created.planId);
+    await client.callTool({
+      name: "resolve_approve_editing_plan",
+      arguments: { planId, expectedRevision: 1, userApproved: true }
+    });
+
+    const queued = parseText(await client.callTool({
+      name: "resolve_execute_editing_plan",
+      arguments: { planId, expectedRevision: 1 }
+    }));
+    expect(queued.executionMode).toBe("ranges");
+    expect(queued.expectedSegments).toEqual([
+      expect.objectContaining({ clipId: "parkour-15s", startFrame: 0, endFrameExclusive: 450, durationFrames: 450, recordFrame: 0 }),
+      expect.objectContaining({ clipId: "frost-35s", startFrame: 300, endFrameExclusive: 1350, durationFrames: 1050, recordFrame: 450 }),
+      expect.objectContaining({ clipId: "rais-40s", startFrame: 150, endFrameExclusive: 1350, durationFrames: 1200, recordFrame: 1500 })
+    ]);
+    expect((await bridge.getPendingRequest())?.command).toBe("timeline.createFromRanges");
+    const request = JSON.parse(await readFile(bridge.requestFilePath, "utf8")) as {
+      payload: { name: string; segments: Array<Record<string, unknown>> };
+    };
+    expect(request.payload.name).toBe("Instagram Reel - Parkour and Combat");
+    expect(request.payload.segments[1]).toEqual({
+      mediaId: "frost", startFrame: 300, endFrameExclusive: 1350, trackIndex: 1, recordFrame: 450, includeAudio: true
+    });
+
+    const persist = async (requestId: string, command: string, result: unknown): Promise<void> => {
+      const now = new Date().toISOString();
+      await writeTextFileAtomic(bridge.responseFilePath(requestId), JSON.stringify({
+        protocolVersion: "1.0",
+        id: requestId,
+        command,
+        ok: true,
+        status: "success",
+        startedAt: now,
+        completedAt: now,
+        durationMs: 1,
+        source: "resolve",
+        result
+      }));
+    };
+    const timelineName = "Instagram Reel - Parkour and Combat";
+    await persist(String(queued.requestId), "timeline.createFromRanges", { timelineName, created: true });
+    await persist("inspect-trimmed", "timeline.inspect", {
+      timeline: { name: timelineName, startFrame: 0, endFrame: 2700 },
+      tracks: {
+        video: [{
+          index: 1,
+          itemCount: 3,
+          items: [
+            { name: "parkour", start: 0, finish: 450, duration: 450, sourceStartFrame: 0, sourceEndFrame: 450 },
+            { name: "frosthandler", start: 450, finish: 1500, duration: 1050, sourceStartFrame: 300, sourceEndFrame: 1350 },
+            { name: "rais-thugs", start: 1500, finish: 2700, duration: 1200, sourceStartFrame: 150, sourceEndFrame: 1350 }
+          ]
+        }]
+      }
+    });
+
+    const executed = parseText(await client.callTool({
+      name: "resolve_mark_editing_plan_executed",
+      arguments: {
+        planId,
+        expectedRevision: 1,
+        requestId: String(queued.requestId),
+        timelineInspectionRequestId: "inspect-trimmed"
+      }
+    }));
+    expect(executed.status).toBe("executed");
   });
 });

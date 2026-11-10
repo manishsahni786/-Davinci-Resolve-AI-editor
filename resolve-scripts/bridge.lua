@@ -275,8 +275,14 @@ elseif command == "media.import" then
 elseif command == "timeline.create" then
   local status, result, errorInfo = runInspection(context.createTimeline)
   writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.createFromRanges" then
+  local status, result, errorInfo = runInspection(context.createTimelineFromRanges)
+  writeResponse(status, result, errorInfo, metaFrom(result))
 elseif command == "timeline.appendClips" then
   local status, result, errorInfo = runInspection(context.appendClips)
+  writeResponse(status, result, errorInfo, metaFrom(result))
+elseif command == "timeline.appendRanges" then
+  local status, result, errorInfo = runInspection(context.appendRanges)
   writeResponse(status, result, errorInfo, metaFrom(result))
 elseif command == "timeline.deleteClips" then
   local status, result, errorInfo = runInspection(context.deleteClips)

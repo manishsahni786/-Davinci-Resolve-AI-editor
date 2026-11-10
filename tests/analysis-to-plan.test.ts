@@ -109,7 +109,7 @@ describe("createPlanDraftFromAnalysis", () => {
 
     expect(draft.warnings.some((line) => line.includes("has a approximate boundary"))).toBe(true);
     expect(draft.warnings.some((line) => line.includes("2 analysis events were ignored"))).toBe(true);
-    expect(draft.warnings.some((line) => line.includes("whole clips only"))).toBe(true);
+    expect(draft.warnings.some((line) => line.includes("converted to whole source frames"))).toBe(true);
   });
 
   it("limits planned events to maxEvents and notes the reduction", () => {

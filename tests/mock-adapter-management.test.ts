@@ -31,8 +31,8 @@ describe("Mock Resolve management commands", () => {
     }
   });
 
-  async function startAdapter(): Promise<void> {
-    adapter = new MockResolveAdapter(settings, logger, { pollIntervalMs: 5 });
+  async function startAdapter(seedClips?: Array<{ name: string; frames: number; fps: number }>): Promise<void> {
+    adapter = new MockResolveAdapter(settings, logger, { pollIntervalMs: 5, seedClips });
     await adapter.start();
   }
 
@@ -208,6 +208,75 @@ describe("Mock Resolve management commands", () => {
     );
     expect(appended.response.ok).toBe(false);
     expect(appended.response.error?.code).toBe("TIMELINE_CLIP_NOT_FOUND");
+  });
+
+  it("inserts trimmed source ranges into a new timeline and reports their frames", async () => {
+    await startAdapter([
+      { name: "parkour", frames: 1800, fps: 30 },
+      { name: "frost", frames: 3600, fps: 30 },
+      { name: "rais", frames: 2700, fps: 30 }
+    ]);
+    const inspected = await manager.execute("media.inspect", {}, { timeoutMs: 2000 });
+    const bins = ((inspected.response.result as Record<string, unknown>).mediaPool as {
+      bins: Array<{ clips: Array<{ name: string; uniqueId: string }> }>;
+    }).bins;
+    const byName = new Map(bins.flatMap((bin) => bin.clips).map((clip) => [clip.name, clip.uniqueId]));
+
+    const created = await manager.execute(
+      "timeline.createFromRanges",
+      {
+        name: "Trimmed Reel",
+        segments: [
+          { mediaId: byName.get("parkour"), startFrame: 0, endFrameExclusive: 450, trackIndex: 1, recordFrame: 0 },
+          { mediaId: byName.get("frost"), startFrame: 300, endFrameExclusive: 1350, trackIndex: 1, recordFrame: 450 },
+          { mediaId: byName.get("rais"), startFrame: 0, endFrameExclusive: 1200, trackIndex: 1, recordFrame: 1500 }
+        ]
+      },
+      { timeoutMs: 2000 }
+    );
+    expect(created.response.ok).toBe(true);
+    const result = created.response.result as {
+      timelineName: string;
+      expectedDurationFrames: number;
+      actualDurationFrames: number;
+      segments: Array<{ startFrame: number; endFrameExclusive: number; recordFrame: number }>;
+    };
+    expect(result.timelineName).toBe("Trimmed Reel");
+    expect(result.expectedDurationFrames).toBe(2700);
+    expect(result.actualDurationFrames).toBe(2700);
+    expect(result.segments[1]).toMatchObject({ startFrame: 300, endFrameExclusive: 1350, recordFrame: 450 });
+
+    const timeline = await manager.execute("timeline.inspect", { includeClips: true }, { timeoutMs: 2000 });
+    const video = ((timeline.response.result as Record<string, unknown>).tracks as {
+      video: Array<{ index: number; itemCount: number; items: Array<Record<string, unknown>> }>;
+    }).video;
+    expect(video[0]?.itemCount).toBe(3);
+    expect(video[0]?.items.map((item) => ({
+      start: item.start,
+      duration: item.duration,
+      sourceStartFrame: item.sourceStartFrame,
+      sourceEndFrame: item.sourceEndFrame
+    }))).toEqual([
+      { start: 0, duration: 450, sourceStartFrame: 0, sourceEndFrame: 450 },
+      { start: 450, duration: 1050, sourceStartFrame: 300, sourceEndFrame: 1350 },
+      { start: 1500, duration: 1200, sourceStartFrame: 0, sourceEndFrame: 1200 }
+    ]);
+  });
+
+  it("rejects out-of-bounds source ranges", async () => {
+    await startAdapter([{ name: "short", frames: 100, fps: 30 }]);
+    const inspected = await manager.execute("media.inspect", {}, { timeoutMs: 2000 });
+    const bins = ((inspected.response.result as Record<string, unknown>).mediaPool as {
+      bins: Array<{ clips: Array<{ uniqueId: string }> }>;
+    }).bins;
+    const mediaId = bins[0]!.clips[0]!.uniqueId;
+    const created = await manager.execute(
+      "timeline.createFromRanges",
+      { name: "Bad Range", segments: [{ mediaId, startFrame: 0, endFrameExclusive: 101, trackIndex: 1 }] },
+      { timeoutMs: 2000 }
+    );
+    expect(created.response.ok).toBe(false);
+    expect(created.response.error?.code).toBe("SOURCE_RANGE_OUT_OF_BOUNDS");
   });
 
   it("reports unsupported commands honestly", async () => {

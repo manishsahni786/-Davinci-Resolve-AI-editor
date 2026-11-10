@@ -23,6 +23,8 @@
     "resolve:timeline": "tsx src/index.ts timeline",
     "resolve:timeline-create": "tsx src/index.ts timeline-create",
     "resolve:timeline-append": "tsx src/index.ts timeline-append",
+    "resolve:timeline-create-ranges": "tsx src/index.ts timeline-create-ranges",
+    "resolve:timeline-append-ranges": "tsx src/index.ts timeline-append-ranges",
     "resolve:timeline-delete": "tsx src/index.ts timeline-delete",
     "resolve:timeline-set-property": "tsx src/index.ts timeline-set-property",
     "reel": "tsx src/index.ts reel",

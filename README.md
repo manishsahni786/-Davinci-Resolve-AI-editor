@@ -2,7 +2,7 @@
 
 An AI-assisted video editing system for **DaVinci Resolve 21.1 Free** on Windows, designed to be driven from **OpenCode** through a local MCP server.
 
-This repository currently has verified Milestone 5 capabilities: project/media management, whole-clip timeline editing, and rough-cut assembly in Resolve Free `21.1.0.17`. Per the current workflow requirement, the Bridge script must now be launched manually for every request. The previously verified Windows UI Automation trigger remains optional but is disabled by default.
+This repository has live-verified project/media management, whole-clip timeline editing, rough-cut assembly and frame-accurate source-range placement (`timeline.createFromRanges`) in Resolve Free `21.1.0.17`. Range placement is verified for single-track sequences, a second video track, multiple distinct source files and linked source audio on A1; `timeline.appendRanges` is implemented and covered by TypeScript, mock-adapter and Lua tests but has not yet been verified live in Resolve Free. Per the current workflow requirement, the Bridge script must now be launched manually for every request. The previously verified Windows UI Automation trigger remains optional but is disabled by default.
 
 ## The important constraint
 
@@ -66,6 +66,8 @@ npm run resolve:clear
 | `npm run resolve:timeline` | Inspect the current or indexed timeline, tracks, items and markers |
 | `npm run resolve:timeline-create -- "<name>" [--media-ids=<id,id>]` | Create a timeline, optionally from media pool clip ids |
 | `npm run resolve:timeline-append -- <mediaId> [<mediaId>...]` | Append media pool clips to the current timeline |
+| `npm run resolve:timeline-create-ranges -- "<name>" --segments='[{"mediaId":"id","startFrame":0,"endFrameExclusive":450,"trackIndex":1,"recordFrame":0}]'` | Create a timeline from frame-accurate source ranges (exclusive end) |
+| `npm run resolve:timeline-append-ranges -- --segments='[{"mediaId":"id","startFrame":0,"endFrameExclusive":450}]'` | Append frame-accurate source ranges to the current timeline |
 | `npm run resolve:timeline-delete -- <trackType> <trackIndex> <itemIndex>...` | Delete timeline items by track coordinates |
 | `npm run resolve:timeline-set-property -- <trackType> <trackIndex> <itemIndex> --key=<key> [--value=<value>]` | Set a property on a timeline item |
 | `npm run reel -- [--project=<name>] [--media=<path,...>] [--topic=<text>] [--platform=instagram|youtube] [--clip-ids=<id,...>] [--timeline=<name>] [--bin=<bin/path>] [--max-clips=<n>] [--no-save]` | Assemble a rough-cut reel from whole clips |
@@ -122,6 +124,10 @@ npm run resolve:clear
   - `timeline.appendClips` (1 item appended live),
   - `timeline.deleteClips` (1 item removed live),
   - `timeline.setItemProperty` (Clip Color = Blue live, `applied: true`; requires a current timeline open).
+- Frame-accurate source-range commands (live-verified in Resolve Free 21.1 for single-track, two-video-track, multi-source and linked-audio sequences):
+  - `timeline.createFromRanges` creates an empty timeline and inserts ordered `{ mediaId, startFrame, endFrameExclusive, trackIndex?, recordFrame?, includeAudio? }` segments; `includeAudio` places the linked source audio on A1 and activates automatically for video-track-1 clips whose source has audio,
+  - `timeline.appendRanges` appends the same segments to the current timeline,
+  - a live 2026-11-09 run proved `AppendToTimeline` clip-info `endFrame` is **exclusive** (start 1200 / end 1799 produced a 599-frame item), so the internal exclusive end is sent unchanged; each insertion is checked against its expected duration and the created timeline is verified by inspection before a plan is marked executed.
 - Optional auto-trigger was verified live previously; it is disabled by default so each Resolve request is manually launched.
 - High-level reel workflow (`npm run reel` / MCP `resolve_make_reel`): inspect or reuse a project, optionally import media, select whole clips by topic tokens or clip ids, create a timeline, append clips, and save. It warns about target aspect ratios but does not trim, add transitions, mix audio or render yet.
 - Structured editing-plan lifecycle: validated source intervals, timeline positions, evidence, confidence, output requests and treatments; drafts persist under `data/plans/`, revisions clear approval, and approval is recorded before the agent edits.
@@ -146,17 +152,19 @@ npm run resolve:clear
 - Mock Resolve adapter implementing the full bridge command set with in-memory project/bin/clip/timeline state.
 - Python worker (`ping`, `env_info`, `shutdown` plus media analysis commands) with JSON-lines IPC and tests.
 - Two-pass event analysis (`analyze_events`): broad pass-1 scan, adaptive pass-2 re-sampling, evidence timestamps validated against sampled frames, explicit boundary uncertainty, bounded request budgets and automatic single-image fallback when a multi-image vision batch fails.
-- Analysis-driven plan drafting (`resolve_create_plan_from_analysis`): converts an `analyze_events` result (events, evidence, categories, confidence, boundary uncertainty) into a validated editing-plan draft stored under `data/plans/`. It keeps model-reported in/out points, records unknown confidence as 0 with a reason note, drops malformed or out-of-range events with a warning, and carries an explicit whole-clips-only execution warning.
+- Analysis-driven plan drafting (`resolve_create_plan_from_analysis`): converts an `analyze_events` result (events, evidence, categories, confidence, boundary uncertainty) into a validated editing-plan draft stored under `data/plans/`. It keeps model-reported in/out points, records unknown confidence as 0 with a reason note, drops malformed or out-of-range events with a warning, and warns that boundaries are converted to whole source frames at execution time.
 - Installer that writes menu launchers directly under `Utility`, stores the implementation in a subfolder, backs up existing bridge scripts outside the Resolve scan path, and preserves `resolve_test.lua`.
-- TypeScript (108 passed, 1 live Resolve integration skipped), Lua (68) and Python (49) tests.
+- TypeScript (133 passed, 1 live Resolve integration skipped), Lua (93) and Python (49) tests.
 
 ## What is not implemented yet
 
-- Trimmed in/out timeline append (`startFrame`/`endFrame` clipInfo), transitions and audio mixing for polished highlight reels.
+- Transitions, effects, captions, audio mixing and project aspect-ratio enforcement for polished highlight reels.
+- Live verification of `timeline.appendRanges` and of frame rates other than 60 fps (`createFromRanges` is live-verified for three single-track segments, a two-track V1/V2 layout, two distinct source files and linked A1 audio; `endFrame` is exclusive).
 - Project aspect-ratio enforcement (Instagram 9:16, YouTube 16:9); the reel workflow currently warns only.
 - Rendering (Milestone 6).
 - End-to-end video analysis is not live-verified in this environment: the local Ollama model is reachable and vision requests can be benchmarked, but FFmpeg/FFprobe are not available to probe and sample source video here. Faster-whisper and its local model weights are also user-managed.
-- Execution of timestamped segments and fully analysis-driven editing workflows (Milestones 7-9). Analysis observations, including two-pass event boundaries, are not yet converted automatically into trimmed Resolve clip intervals.
+- Automatic conversion of two-pass event boundaries into trimmed Resolve intervals (the planner supports explicit source ranges; analysis-driven boundary refinement remains future work).
+- Execution still rejects transitions, effects, captions and audio mixing/gain (linked source audio for video-track-1 ranges is placed on A1), and whole-clip execution remains the legacy fallback when no frame rates are supplied.
 
 No editing tool claims to be live-verified before it has been exercised inside Resolve Free.
 
@@ -213,7 +221,7 @@ config/                 settings example
 - Source media is never modified or deleted.
 - Commands are not executed from natural language without capability validation and confirmation.
 - Arbitrary shell commands are never generated from user instructions.
-- The Lua scripts and MCP tools implement diagnostics, inspection, project/media management, and whole-clip timeline editing.
+- The Lua scripts and MCP tools implement diagnostics, inspection, project/media management, whole-clip timeline editing, and frame-accurate source-range placement (single-track, two-track V1/V2, multi-source and linked A1 audio insertion live-verified; `appendRanges` pending).
 - A missing or failed Resolve response is reported as a timeout/failure, never as success.
 
 ## Milestone 4 verification (completed 2026-11-02)
@@ -226,4 +234,4 @@ Timeline editing is wired through protocol validation, the Lua bridge, mock adap
 
 The optional `resolve-scripts/invoke-bridge.ps1` trigger was verified live previously. It remains disabled by default; each request now requires a manual Bridge launch. The `bridge.auto-trigger` capability records the optional implementation, not the default workflow.
 
-Milestone 5 still uses whole clips only. Trimming, transitions, audio mixing and polished highlight-reel pacing remain future work.
+Milestone 5 whole-clip editing remains verified. Frame-accurate source ranges are implemented through `timeline.createFromRanges` / `timeline.appendRanges`; live Resolve Free runs confirmed that `AppendToTimeline` `endFrame` is exclusive and created exact three-segment, two-video-track, two-source and linked-audio sequences with the requested source in/out frames, durations and A1 audio items, all confirmed by timeline inspection. Transitions, effects, captions, audio mixing, render/export and polished highlight-reel pacing remain future work.

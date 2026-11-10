@@ -603,11 +603,25 @@ local function timelineSummary(timeline, session)
 end
 
 local function timelineItemSummary(item, session)
+  local mediaItem = optionalCall(session, item, "GetMediaPoolItem")
+  local mediaPoolItemName = nil
+  local mediaPoolItemUniqueId = nil
+  local mediaPoolItemMediaId = nil
+  if mediaItem ~= nil then
+    mediaPoolItemName = recordCall(session, mediaItem, "GetName")
+    mediaPoolItemUniqueId = recordCall(session, mediaItem, "GetUniqueId")
+    mediaPoolItemMediaId = recordCall(session, mediaItem, "GetMediaId")
+  end
   return {
     name = recordCall(session, item, "GetName"),
     start = recordCall(session, item, "GetStart"),
     finish = recordCall(session, item, "GetEnd"),
     duration = recordCall(session, item, "GetDuration"),
+    sourceStartFrame = optionalCall(session, item, "GetSourceStartFrame"),
+    sourceEndFrame = optionalCall(session, item, "GetSourceEndFrame"),
+    mediaPoolItemName = mediaPoolItemName,
+    mediaPoolItemUniqueId = mediaPoolItemUniqueId,
+    mediaPoolItemMediaId = mediaPoolItemMediaId,
     trackType = optionalCall(session, item, "GetTrackType"),
     trackIndex = optionalCall(session, item, "GetTrackIndex")
   }
@@ -1514,6 +1528,472 @@ function context.appendClips(options)
     items = appendedSummaries,
     timelineName = recordCall(session, timeline, "GetName")
   }
+  return result, nil
+end
+
+local function rangeFrameValue(value)
+  local number = tonumber(value)
+  if number == nil or number < 0 or number ~= math.floor(number) then
+    return nil
+  end
+  return number
+end
+
+-- Validates source-range segments. Every segment is described with an
+-- exclusive end frame, which is also what AppendToTimeline expects on the live
+-- Resolve Free 21.1 build, so no off-by-one conversion happens here.
+local function validateRangeSegments(segments)
+  if type(segments) ~= "table" or #segments == 0 then
+    return nil, {
+      code = "VALIDATION_ERROR",
+      message = "segments must be a non-empty array of { mediaId, startFrame, endFrameExclusive }."
+    }
+  end
+  if #segments > 1000 then
+    return nil, {
+      code = "TOO_MANY_SEGMENTS",
+      message = "At most 1000 source ranges can be inserted per request."
+    }
+  end
+  local normalized = {}
+  for index, segment in ipairs(segments) do
+    if type(segment) ~= "table" then
+      return nil, {
+        code = "VALIDATION_ERROR",
+        message = "Segment at index " .. tostring(index) .. " is not an object.",
+        details = { index = index }
+      }
+    end
+    local mediaId = idString(segment.mediaId)
+    if mediaId == nil then
+      return nil, {
+        code = "VALIDATION_ERROR",
+        message = "Segment at index " .. tostring(index) .. " has an invalid mediaId.",
+        details = { index = index }
+      }
+    end
+    local startFrame = rangeFrameValue(segment.startFrame)
+    local endFrameExclusive = rangeFrameValue(segment.endFrameExclusive)
+    if startFrame == nil or endFrameExclusive == nil or endFrameExclusive <= startFrame then
+      return nil, {
+        code = "INVALID_SOURCE_RANGE",
+        message = "Segment at index " .. tostring(index) .. " has an invalid source frame range.",
+        details = { index = index, startFrame = segment.startFrame, endFrameExclusive = segment.endFrameExclusive }
+      }
+    end
+    local trackIndex = nil
+    if segment.trackIndex ~= nil then
+      trackIndex = rangeFrameValue(segment.trackIndex)
+      if trackIndex == nil or trackIndex < 1 or trackIndex > 100 then
+        return nil, {
+          code = "INVALID_TRACK_INDEX",
+          message = "Segment at index " .. tostring(index) .. " has an invalid trackIndex.",
+          details = { index = index }
+        }
+      end
+    end
+    local recordFrame = nil
+    if segment.recordFrame ~= nil then
+      recordFrame = rangeFrameValue(segment.recordFrame)
+      if recordFrame == nil then
+        return nil, {
+          code = "INVALID_TIMELINE_POSITION",
+          message = "Segment at index " .. tostring(index) .. " has an invalid recordFrame.",
+          details = { index = index }
+        }
+      end
+    end
+    normalized[#normalized + 1] = {
+      mediaId = mediaId,
+      startFrame = startFrame,
+      endFrameExclusive = endFrameExclusive,
+      trackIndex = trackIndex,
+      recordFrame = recordFrame,
+      -- Linked source audio is placed on A1 when the caller asks for it; the
+      -- default stays video-only so older callers keep their verified behaviour.
+      includeAudio = segment.includeAudio == true
+    }
+  end
+  return normalized, nil
+end
+
+-- Resolve does not create tracks on demand: AppendToTimeline with a trackIndex
+-- above GetTrackCount returns an empty/invalid item and places nothing (live
+-- Resolve Free 21.1 behaviour), so raise the count first. AddTrack must
+-- actually increase GetTrackCount; a truthy return alone is not enough (live
+-- multi-track failure 0b634dca returned an empty V2 item).
+local function ensureTrackCount(session, timeline, trackType, requiredTracks)
+  local existing = recordCall(session, timeline, "GetTrackCount", trackType)
+  if type(existing) ~= "number" then
+    existing = 1
+  end
+  local addedCount = 0
+  if existing < requiredTracks and session.resolve ~= nil then
+    -- AddTrack is more reliable on the Edit page.
+    recordCall(session, session.resolve, "OpenPage", "edit")
+  end
+  local attempts = 0
+  while existing < requiredTracks and attempts < requiredTracks + 2 do
+    attempts = attempts + 1
+    local before = existing
+    local added = recordCall(session, timeline, "AddTrack", trackType)
+    local reported = recordCall(session, timeline, "GetTrackCount", trackType)
+    if type(reported) == "number" and reported > before then
+      existing = reported
+      addedCount = addedCount + 1
+    else
+      return nil, {
+        code = "TRACK_CREATE_FAILED",
+        message = "Could not add " .. trackType .. " track " .. tostring(before + 1)
+          .. " needed for the requested source ranges"
+          .. " (AddTrack returned " .. tostring(added)
+          .. ", GetTrackCount stayed at " .. tostring(reported) .. ").",
+        details = {
+          trackType = trackType,
+          requiredTracks = requiredTracks,
+          existingTracks = before,
+          reportedTracks = reported,
+          addTrackResult = added,
+          tracksAdded = addedCount
+        }
+      }
+    end
+  end
+  return addedCount, nil
+end
+
+-- Appends validated source ranges sequentially. Stops on the first failure and
+-- returns the exact partial state; it never reports success for an incomplete
+-- sequence.
+local function appendRangeSegments(session, mediaPool, timeline, segments)
+  local normalized, validationFailure = validateRangeSegments(segments)
+  if normalized == nil then
+    return nil, validationFailure
+  end
+
+  local mediaIds = {}
+  for index, segment in ipairs(normalized) do
+    mediaIds[index] = segment.mediaId
+  end
+  local items, missing = resolveMediaItems(session, mediaPool, mediaIds)
+  if items == nil then
+    return nil, {
+      code = "TIMELINE_CLIP_NOT_FOUND",
+      message = "One or more media ids did not match media pool clips.",
+      details = { missingIds = missing }
+    }
+  end
+
+  local appendedSummaries = emptyArray()
+  local segmentReports = emptyArray()
+  local expectedTotal = 0
+  local actualTotal = 0
+  local actualTotalKnown = true
+  local expectedAudioItems = 0
+
+  local requiredTracks = 1
+  for _, segment in ipairs(normalized) do
+    if segment.trackIndex ~= nil and segment.trackIndex > requiredTracks then
+      requiredTracks = segment.trackIndex
+    end
+  end
+  local tracksAdded, trackFailure = ensureTrackCount(session, timeline, "video", requiredTracks)
+  if tracksAdded == nil then
+    return nil, trackFailure
+  end
+
+  local needsAudio = false
+  for _, segment in ipairs(normalized) do
+    if segment.includeAudio == true then
+      needsAudio = true
+    end
+  end
+  local audioTracksAdded = 0
+  if needsAudio then
+    local added, audioTrackFailure = ensureTrackCount(session, timeline, "audio", 1)
+    if added == nil then
+      return nil, audioTrackFailure
+    end
+    audioTracksAdded = added
+  end
+
+  for index, segment in ipairs(normalized) do
+    -- Linked audio only lands on A1; a silent source must stay video-only
+    -- instead of failing the insert. Unknown channel counts keep audio on.
+    local includeAudio = segment.includeAudio == true
+    if includeAudio then
+      local channels = optionalCall(session, items[index], "GetClipProperty", "Audio Ch")
+      local channelCount = tonumber(channels)
+      if channelCount ~= nil and channelCount <= 0 then
+        includeAudio = false
+      end
+    end
+
+    local clipInfo = {
+      mediaPoolItem = items[index],
+      startFrame = segment.startFrame,
+      -- Live Resolve Free 21.1 evidence: AppendToTimeline endFrame is exclusive
+      -- (start 1200 / end 1799 produced 599 frames), so pass it unchanged.
+      endFrame = segment.endFrameExclusive
+    }
+    if not includeAudio then
+      -- Video-only placement: omit linked audio so multi-track inserts do not
+      -- depend on matching audio-track layout.
+      clipInfo.mediaType = 1
+    end
+    if segment.trackIndex ~= nil then
+      clipInfo.trackIndex = segment.trackIndex
+    end
+    if segment.recordFrame ~= nil then
+      clipInfo.recordFrame = segment.recordFrame
+    end
+
+    local appended = recordCall(session, mediaPool, "AppendToTimeline", { clipInfo })
+    local appendedItems = arrayItems(appended)
+    local item = appendedItems[1]
+    local expectedDuration = segment.endFrameExclusive - segment.startFrame
+    local actualDuration = item ~= nil and recordCall(session, item, "GetDuration") or nil
+    local actualStart = item ~= nil and recordCall(session, item, "GetStart") or nil
+
+    if #appendedItems == 0 or item == nil or type(actualDuration) ~= "number" then
+      segmentReports[#segmentReports + 1] = {
+        index = index,
+        mediaId = segment.mediaId,
+        startFrame = segment.startFrame,
+        endFrameExclusive = segment.endFrameExclusive,
+        endFrameSent = segment.endFrameExclusive,
+        trackIndex = segment.trackIndex,
+        recordFrame = segment.recordFrame,
+        actualStart = actualStart,
+        expectedDurationFrames = expectedDuration,
+        actualDurationFrames = actualDuration,
+        includeAudio = includeAudio,
+        videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+        audioTracks = recordCall(session, timeline, "GetTrackCount", "audio")
+      }
+      return {
+        appended = { count = #appendedSummaries, items = appendedSummaries, timelineName = recordCall(session, timeline, "GetName") },
+        segments = segmentReports,
+        expectedDurationFrames = expectedTotal + expectedDuration,
+        actualDurationFrames = actualTotalKnown and actualTotal or nil,
+        partial = true,
+        tracksAdded = tracksAdded,
+        videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+        audioTracks = recordCall(session, timeline, "GetTrackCount", "audio")
+      }, {
+        code = "SEGMENT_APPEND_FAILED",
+        message = "Resolve did not append a usable source range at index " .. tostring(index)
+          .. " (often means trackIndex is above GetTrackCount).",
+        details = {
+          failedIndex = index,
+          mediaId = segment.mediaId,
+          appendedCount = #appendedSummaries,
+          trackIndex = segment.trackIndex,
+          videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+          tracksAdded = tracksAdded
+        }
+      }
+    end
+
+    expectedTotal = expectedTotal + expectedDuration
+    actualTotal = actualTotal + actualDuration
+    if includeAudio then
+      expectedAudioItems = expectedAudioItems + 1
+    end
+
+    appendedSummaries[#appendedSummaries + 1] = timelineItemSummary(item, session)
+    segmentReports[#segmentReports + 1] = {
+      index = index,
+      mediaId = segment.mediaId,
+      startFrame = segment.startFrame,
+      endFrameExclusive = segment.endFrameExclusive,
+      endFrameSent = segment.endFrameExclusive,
+      trackIndex = segment.trackIndex,
+      recordFrame = segment.recordFrame,
+      actualStart = actualStart,
+      expectedDurationFrames = expectedDuration,
+      actualDurationFrames = actualDuration,
+      includeAudio = includeAudio
+    }
+
+    if math.abs(actualDuration - expectedDuration) > 0.5 then
+      return {
+        appended = { count = #appendedSummaries, items = appendedSummaries, timelineName = recordCall(session, timeline, "GetName") },
+        segments = segmentReports,
+        expectedDurationFrames = expectedTotal,
+        actualDurationFrames = actualTotal,
+        partial = true,
+        tracksAdded = tracksAdded,
+        videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+        audioTracks = recordCall(session, timeline, "GetTrackCount", "audio")
+      }, {
+        code = "TIMELINE_DURATION_MISMATCH",
+        message = "Resolve inserted a different duration for source range at index " .. tostring(index) .. ".",
+        details = {
+          failedIndex = index,
+          mediaId = segment.mediaId,
+          expectedDurationFrames = expectedDuration,
+          actualDurationFrames = actualDuration
+        }
+      }
+    end
+  end
+
+  -- Audio items are counted on A1 because linked placement is the only audio
+  -- layout the bridge requests. A shortfall means Resolve silently dropped the
+  -- linked audio even though the video items were accepted.
+  local audioItemCount = 0
+  if needsAudio then
+    audioItemCount = #arrayItems(optionalCall(session, timeline, "GetItemListInTrack", "audio", 1))
+  end
+
+  local summary = {
+    appended = { count = #appendedSummaries, items = appendedSummaries, timelineName = recordCall(session, timeline, "GetName") },
+    segments = segmentReports,
+    expectedDurationFrames = expectedTotal,
+    actualDurationFrames = actualTotal,
+    partial = false,
+    tracksAdded = tracksAdded,
+    videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+    audioTracks = recordCall(session, timeline, "GetTrackCount", "audio"),
+    audioTracksAdded = audioTracksAdded,
+    expectedAudioItems = expectedAudioItems,
+    audioItems = audioItemCount
+  }
+
+  if needsAudio and audioItemCount < expectedAudioItems then
+    summary.partial = true
+    return summary, {
+      code = "AUDIO_APPEND_FAILED",
+      message = "Resolve placed " .. tostring(audioItemCount) .. " audio items on A1 but "
+        .. tostring(expectedAudioItems) .. " were requested for the linked source ranges.",
+      details = {
+        expectedAudioItems = expectedAudioItems,
+        audioItems = audioItemCount,
+        audioTracks = summary.audioTracks,
+        videoTracks = summary.videoTracks
+      }
+    }
+  end
+
+  return summary, nil
+end
+
+function context.createTimelineFromRanges(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local name = nil
+  if options.name ~= nil then
+    name = validName(options.name)
+    if name == nil then
+      result.failure = {
+        code = "INVALID_TIMELINE_NAME",
+        message = "Timeline name is empty or contains unsupported characters."
+      }
+      return result, result.failure
+    end
+  end
+  local timelineName = name or "Timeline"
+  local timeline = recordCall(session, mediaPool, "CreateEmptyTimeline", timelineName)
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_CREATE_FAILED",
+      message = "Resolve did not create the timeline."
+    }
+    return result, result.failure
+  end
+
+  result.timeline = timelineSummary(timeline, session)
+  result.timelineName = result.timeline.name
+  result.created = true
+
+  local rangeResult, rangeFailure = appendRangeSegments(session, mediaPool, timeline, options.segments)
+  if rangeResult ~= nil then
+    result.appended = rangeResult.appended
+    result.segments = rangeResult.segments
+    result.expectedDurationFrames = rangeResult.expectedDurationFrames
+    result.actualDurationFrames = rangeResult.actualDurationFrames
+    result.partial = rangeResult.partial
+    result.tracksAdded = rangeResult.tracksAdded
+    result.videoTracks = rangeResult.videoTracks
+    result.audioTracks = rangeResult.audioTracks
+    result.audioTracksAdded = rangeResult.audioTracksAdded
+    result.expectedAudioItems = rangeResult.expectedAudioItems
+    result.audioItems = rangeResult.audioItems
+  end
+  -- Refresh after AddTrack / AppendToTimeline so callers see the true track count.
+  result.timeline = timelineSummary(timeline, session)
+  result.timelineName = result.timeline.name
+  if rangeFailure ~= nil then
+    result.failure = rangeFailure
+    result.timelines = listTimelines(session.project, session)
+    return result, rangeFailure
+  end
+
+  result.timelines = listTimelines(session.project, session)
+  return result, nil
+end
+
+function context.appendRanges(options)
+  options = options or {}
+  local session = createSession()
+  local result = baseResult(session)
+  if session.failure then
+    result.failure = session.failure
+    return result, session.failure
+  end
+
+  local timeline = recordCall(session, session.project, "GetCurrentTimeline")
+  if timeline == nil then
+    result.failure = {
+      code = "TIMELINE_UNAVAILABLE",
+      message = "No current timeline is open."
+    }
+    return result, result.failure
+  end
+
+  local mediaPool = recordCall(session, session.project, "GetMediaPool")
+  if mediaPool == nil then
+    result.failure = {
+      code = "MEDIA_POOL_UNAVAILABLE",
+      message = "Could not obtain the project MediaPool."
+    }
+    return result, result.failure
+  end
+
+  local rangeResult, rangeFailure = appendRangeSegments(session, mediaPool, timeline, options.segments)
+  if rangeResult ~= nil then
+    result.appended = rangeResult.appended
+    result.segments = rangeResult.segments
+    result.expectedDurationFrames = rangeResult.expectedDurationFrames
+    result.actualDurationFrames = rangeResult.actualDurationFrames
+    result.partial = rangeResult.partial
+    result.tracksAdded = rangeResult.tracksAdded
+    result.videoTracks = rangeResult.videoTracks
+    result.audioTracks = rangeResult.audioTracks
+    result.audioTracksAdded = rangeResult.audioTracksAdded
+    result.expectedAudioItems = rangeResult.expectedAudioItems
+    result.audioItems = rangeResult.audioItems
+  end
+  if rangeFailure ~= nil then
+    result.failure = rangeFailure
+    return result, rangeFailure
+  end
   return result, nil
 end
 

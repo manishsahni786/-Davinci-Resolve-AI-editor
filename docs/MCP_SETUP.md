@@ -24,7 +24,29 @@ npm run mcp
 
 Run the server directly only with an MCP client. It communicates over stdin/stdout, so starting it in a normal terminal will appear to hang.
 
-## 2. OpenCode configuration
+## 2. Cursor configuration
+
+Project-level MCP config lives at `.cursor/mcp.json` so Cursor Agent can use the same tools:
+
+```json
+{
+  "mcpServers": {
+    "ai-video-editor": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["D:/AI_Projects/Divinci+ Opencode/dist/mcp-server.js"],
+      "env": {
+        "AVE_AUTO_TRIGGER": "false",
+        "AVE_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
+```
+
+Build first (`npm run build`), then restart Cursor (or toggle the server under **Customize → MCPs**) so `resolve_*` tools appear. Bridge launches remain manual.
+
+## 3. OpenCode configuration
 
 This repository includes an `opencode.json` that registers the server:
 
@@ -49,7 +71,7 @@ Restart OpenCode after changing MCP configuration. Config is loaded only at star
 
 The server also writes its logs to the normal project log directory, so stdout remains reserved for MCP JSON-RPC.
 
-## 3. Tools
+## 4. Tools
 
 | Tool | Purpose |
 | --- | --- |
@@ -82,7 +104,7 @@ The server also writes its logs to the normal project log directory, so stdout r
 
 The inspection tools are read-only with respect to the Resolve project. The five Milestone 4 management tools modify the project (project list, media pool bins, media links) but never modify or delete source media files; they are verified live in Resolve Free 21.1.0.17. All four Milestone 5 timeline-editing tools (`timeline.create`, `timeline.appendClips`, `timeline.deleteClips`, `timeline.setItemProperty`) were verified live in Free 21.1.0.17, and `resolve_make_reel` completed a live rough-cut assembly. Source media files are never modified or deleted.
 
-## 4. Queue and read workflow
+## 5. Queue and read workflow
 
 Tools queue and return a request id by default. After launching the Bridge in Resolve, read the response by id:
 

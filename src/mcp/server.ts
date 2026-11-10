@@ -16,6 +16,8 @@ import { listCapabilities, summarizeCapabilities } from "../resolve/resolve-capa
 import { EditingPlanStore } from "../planning/plan-store.js";
 import { createPlanDraftFromAnalysis } from "../planning/analysis-to-plan.js";
 import { EditingPlanDraftSchema, type EditingPlan } from "../planning/editing-plan.js";
+import { prepareExecution } from "../planning/execution-plan.js";
+import { verifyTimelineInspection, type InspectedTimeline } from "../planning/execution-verification.js";
 import { toAppError } from "../utils/errors.js";
 import type { Logger } from "../utils/logger.js";
 import { z } from "zod";
@@ -138,55 +140,6 @@ function hasWait(
     return true;
   }
   return dependencies.trigger?.enabled === true;
-}
-
-function wholeClipExecutionIssues(plan: EditingPlan): string[] {
-  const issues: string[] = [];
-  if (!plan.project.createNewTimeline) {
-    issues.push("Execution currently supports creating a new timeline only.");
-  }
-  if (plan.transitions.length > 0) issues.push("Transitions are not implemented.");
-  if (plan.captions.length > 0) issues.push("Captions and subtitles are not implemented.");
-  if (plan.effects.length > 0) issues.push("Timeline effects are not implemented.");
-  if (Object.keys(plan.audio).length > 0) issues.push("Audio mixing is not implemented.");
-  const outputOptions = [
-    "aspectRatio", "width", "height", "frameRate", "renderFormat", "codec", "quality", "outputPath"
-  ] as const;
-  if (outputOptions.some((key) => plan.output[key] !== undefined)) {
-    issues.push("Output formatting and rendering are not implemented.");
-  }
-
-  let expectedTimelineStart = 0;
-  for (const clip of plan.clips) {
-    const source = plan.sources.find((candidate) => candidate.mediaId === clip.sourceMediaId);
-    if (!source) {
-      issues.push(`Source ${clip.sourceMediaId} is missing from the plan.`);
-      continue;
-    }
-    const oneFrame = source.frameRate ? 1 / source.frameRate : 0;
-    const tolerance = Math.max(0.001, oneFrame);
-    if (clip.videoTrack !== 1 || clip.audioTrack !== undefined) {
-      issues.push(`Clip ${clip.clipId} requests a track assignment that is not implemented; current execution uses Resolve's default tracks.`);
-    }
-    if (Math.abs(clip.sourceStartSeconds) > tolerance
-      || Math.abs(clip.sourceEndSeconds - source.durationSeconds) > tolerance) {
-      issues.push(`Clip ${clip.clipId} uses a partial source interval; trimmed placement is not implemented.`);
-    }
-    if (Math.abs(clip.timelineStartSeconds - expectedTimelineStart) > tolerance) {
-      issues.push(`Clip ${clip.clipId} has a gap or overlap; timeline gaps and overlaps are not implemented.`);
-    }
-    expectedTimelineStart = clip.timelineStartSeconds + clip.sourceEndSeconds - clip.sourceStartSeconds;
-  }
-  if (plan.requestedDurationSeconds !== undefined
-    && Math.abs(plan.requestedDurationSeconds - plan.plannedDurationSeconds) > 0.05
-    && plan.acceptedDurationSeconds === undefined) {
-    issues.push(`Requested duration is ${plan.requestedDurationSeconds}s, but the proposed plan is ${plan.plannedDurationSeconds}s. Resolve the shortfall or overrun with the user before execution.`);
-  }
-  if (plan.acceptedDurationSeconds !== undefined
-    && Math.abs(plan.acceptedDurationSeconds - plan.plannedDurationSeconds) > 0.05) {
-    issues.push(`The explicitly accepted duration is ${plan.acceptedDurationSeconds}s, but the plan is ${plan.plannedDurationSeconds}s.`);
-  }
-  return [...new Set(issues)];
 }
 
 async function queueInspection(
@@ -444,7 +397,7 @@ export function createMcpServer(dependencies: McpServerDependencies): McpServer 
     "resolve_execute_editing_plan",
     {
       title: "Queue approved editing plan",
-      description: "Queue a new timeline from an explicitly approved plan. Current execution supports only contiguous whole clips on a new timeline. The user must launch the Resolve Bridge for this request.",
+      description: "Queue a new timeline from an explicitly approved plan. Execution supports contiguous whole clips, frame-accurate source ranges, multiple video tracks and linked source audio for video-track-1 ranges when frame rates are known. Transitions, captions, effects, audio mixing/gain and rendering are rejected. The user must launch the Resolve Bridge for this request.",
       inputSchema: {
         planId: z.string().trim().min(1).max(128),
         expectedRevision: z.number().int().positive()
@@ -460,30 +413,59 @@ export function createMcpServer(dependencies: McpServerDependencies): McpServer 
         if (plan.status !== "approved") {
           throw new Error(`Only an approved plan can be executed (current status: ${plan.status}).`);
         }
-        const issues = wholeClipExecutionIssues(plan);
-        if (issues.length > 0) {
+        const preparation = prepareExecution(plan);
+        if (preparation.issues.length > 0) {
           return toolText({
             ok: false,
             code: "PLAN_NOT_EXECUTABLE",
             planId,
             revision: expectedRevision,
-            issues
+            issues: preparation.issues
           }, true);
         }
+
+        const command = preparation.mode === "ranges" ? "timeline.createFromRanges" : "timeline.create";
+        const payload = preparation.mode === "ranges"
+          ? {
+              name: plan.project.timelineName,
+              segments: preparation.segments.map((segment) => ({
+                mediaId: segment.mediaId,
+                startFrame: segment.startFrame,
+                endFrameExclusive: segment.endFrameExclusive,
+                trackIndex: segment.trackIndex,
+                recordFrame: segment.recordFrame,
+                includeAudio: segment.includeAudio
+              }))
+            }
+          : {
+              name: plan.project.timelineName,
+              mediaIds: plan.clips.map((clip) => clip.sourceMediaId)
+            };
 
         const requestId = randomUUID();
         await planStore.queueExecution(planId, expectedRevision, requestId);
         try {
           const request = await dependencies.manager.enqueueOnly(
-            "timeline.create",
-            { name: plan.project.timelineName, mediaIds: plan.clips.map((clip) => clip.sourceMediaId) },
+            command,
+            payload,
             { id: requestId, timeoutMs: dependencies.settings.commandTimeoutMs }
           );
           return toolText({
-            ...queuedResponse(dependencies, "timeline.create", request.id),
+            ...queuedResponse(dependencies, command, request.id),
             planId,
             planRevision: expectedRevision,
-            planStatus: "executing"
+            planStatus: "executing",
+            executionMode: preparation.mode,
+            expectedSegments: preparation.segments.map((segment) => ({
+              clipId: segment.clipId,
+              mediaId: segment.mediaId,
+              trackIndex: segment.trackIndex,
+              startFrame: segment.startFrame,
+              endFrameExclusive: segment.endFrameExclusive,
+              durationFrames: segment.durationFrames,
+              recordFrame: segment.recordFrame,
+              includeAudio: segment.includeAudio
+            }))
           });
         } catch (error) {
           await planStore.cancelExecution(planId, expectedRevision, requestId);
@@ -517,19 +499,33 @@ export function createMcpServer(dependencies: McpServerDependencies): McpServer 
     async ({ planId, expectedRevision, requestId, timelineInspectionRequestId, saveRequestId }) => {
       try {
         const plan = await planStore.get(planId);
+        const preparation = prepareExecution(plan);
+        if (preparation.issues.length > 0) {
+          throw new Error(`The plan is no longer executable: ${preparation.issues.join(" ")}`);
+        }
         const response = await dependencies.bridge.readResponse(requestId);
-        if (!response || !response.ok || response.command !== "timeline.create") {
-          throw new Error("The queued timeline.create request has no successful Resolve response.");
+        const expectedCommand = preparation.mode === "ranges" ? "timeline.createFromRanges" : "timeline.create";
+        if (!response || !response.ok || response.command !== expectedCommand) {
+          throw new Error(`The queued ${expectedCommand} request has no successful Resolve response.`);
         }
         const inspected = await dependencies.bridge.readResponse(timelineInspectionRequestId);
-        const inspectedResult = inspected?.result as {
-          timeline?: { name?: string };
-          tracks?: { video?: Array<{ itemCount?: number }> };
-        } | undefined;
-        if (!inspected?.ok || inspected.command !== "timeline.inspect"
-          || inspectedResult?.timeline?.name !== plan.project.timelineName
-          || inspectedResult.tracks?.video?.[0]?.itemCount !== plan.clips.length) {
-          throw new Error("The timeline inspection did not verify the approved plan name and clip count.");
+        if (!inspected?.ok || inspected.command !== "timeline.inspect") {
+          throw new Error("The timeline inspection request has no successful Resolve response.");
+        }
+        const verification = verifyTimelineInspection(
+          plan,
+          preparation,
+          inspected.result as InspectedTimeline | undefined
+        );
+        if (!verification.ok) {
+          return toolText({
+            ok: false,
+            code: "TIMELINE_VERIFICATION_FAILED",
+            planId,
+            revision: expectedRevision,
+            checkedItems: verification.checkedItems,
+            issues: verification.issues
+          }, true);
         }
         if (plan.project.saveAfterExecution) {
           if (!saveRequestId) {

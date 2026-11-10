@@ -58,8 +58,8 @@ describe("editing plan contract", () => {
   it("requires an explicit new approval after a plan revision", () => {
     const approved = approveEditingPlan(createEditingPlan(draft, "plan-1"));
     const revised = reviseEditingPlan(approved, {
-      clips: [{ ...approved.clips[0]!, timelineStartSeconds: 2 }],
-      plannedDurationSeconds: 12
+      clips: [{ ...approved.clips[0]!, sourceStartSeconds: 0 }],
+      plannedDurationSeconds: 20
     });
     expect(revised.revision).toBe(2);
     expect(revised.status).toBe("draft");

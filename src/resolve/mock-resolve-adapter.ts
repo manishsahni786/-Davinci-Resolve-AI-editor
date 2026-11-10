@@ -25,6 +25,14 @@ import {
   writeTextFileAtomic
 } from "../utils/file-utils.js";
 
+export interface MockSeedClip {
+  name?: string;
+  filePath?: string;
+  frames?: number;
+  fps?: number;
+  resolution?: string;
+}
+
 export interface MockResolveAdapterOptions {
   latencyMs?: number;
   pollIntervalMs?: number;
@@ -32,6 +40,7 @@ export interface MockResolveAdapterOptions {
   isStudio?: boolean;
   projectName?: string;
   timelineName?: string;
+  seedClips?: MockSeedClip[];
 }
 
 interface MockClip {
@@ -66,6 +75,10 @@ interface MockTimelineItem {
   trackType: string;
   trackIndex: number;
   properties: Record<string, string | number | boolean>;
+  mediaUniqueId: string;
+  mediaId: number;
+  sourceStartFrame: number;
+  sourceEndFrame: number;
 }
 
 interface MockProject {
@@ -86,15 +99,33 @@ function createMockId(prefix: string, seed: string): string {
   return `${prefix}-mock-${seed.toLowerCase().replace(/[^a-z0-9-]/g, "")}`;
 }
 
-function createMockState(projectName: string, timelineName: string): MockState {
+function createMockState(
+  projectName: string,
+  timelineName: string,
+  seedClips: MockSeedClip[] = []
+): MockState {
   const currentProject: MockProject = {
     name: projectName,
     uniqueId: createMockId("proj", projectName)
   };
+  const seeded: MockClip[] = seedClips.map((clip, index) => {
+    const filePath = clip.filePath ?? `C:/Media/${clip.name ?? `clip-${index + 1}`}.mp4`;
+    return {
+      name: clip.name ?? (filePath.split(/[\\/]/).pop() ?? `clip-${index + 1}`),
+      uniqueId: createMockId("clip", `${filePath}-${index}`),
+      mediaId: 2000 + index,
+      type: "Video",
+      filePath,
+      duration: "00:00:00:00",
+      frames: Math.max(1, Math.trunc(clip.frames ?? 300)),
+      resolution: clip.resolution ?? "1920x1080",
+      fps: clip.fps ?? 30
+    };
+  });
   return {
     projects: [currentProject],
     currentProject,
-    bins: [{ name: "Master Bin", path: "", clips: [] }],
+    bins: [{ name: "Master Bin", path: "", clips: seeded }],
     timelines: [{
       name: timelineName,
       uniqueId: createMockId("tl", timelineName),
@@ -163,16 +194,127 @@ function findMockClipByMediaId(state: MockState, mediaId: string): MockClip | un
   return undefined;
 }
 
+function buildMockItem(
+  clip: MockClip,
+  start: number,
+  duration: number,
+  trackIndex: number,
+  sourceStartFrame: number,
+  trackType = "video"
+): MockTimelineItem {
+  return {
+    name: clip.name,
+    start,
+    finish: start + duration,
+    duration,
+    trackType,
+    trackIndex,
+    properties: { mediaId: String(clip.mediaId) },
+    mediaUniqueId: clip.uniqueId,
+    mediaId: clip.mediaId,
+    sourceStartFrame,
+    sourceEndFrame: sourceStartFrame + duration
+  };
+}
+
+interface MockRangeSegment {
+  clip: MockClip;
+  startFrame: number;
+  endFrameExclusive: number;
+  trackIndex: number;
+  recordFrame: number | null;
+  includeAudio: boolean;
+}
+
+function parseMockRangeSegments(
+  payloadRecord: Record<string, unknown>,
+  state: MockState
+): MockRangeSegment[] {
+  const rawSegments = Array.isArray(payloadRecord.segments) ? payloadRecord.segments : [];
+  if (rawSegments.length === 0) {
+    throw new MockCommandError("VALIDATION_ERROR", "Mock: segments must be a non-empty array.");
+  }
+  if (rawSegments.length > 1000) {
+    throw new MockCommandError("TOO_MANY_SEGMENTS", "Mock: at most 1000 segments are allowed.");
+  }
+  return rawSegments.map((raw, index) => {
+    const segment = (raw ?? {}) as Record<string, unknown>;
+    const mediaId = typeof segment.mediaId === "string" ? segment.mediaId : "";
+    const clip = mediaId ? findMockClipByMediaId(state, mediaId) : undefined;
+    if (!clip) {
+      throw new MockCommandError("TIMELINE_CLIP_NOT_FOUND", `Mock: media id not found at segment ${index + 1}: ${mediaId}`);
+    }
+    const startFrame = Number(segment.startFrame);
+    const endFrameExclusive = Number(segment.endFrameExclusive);
+    if (!Number.isInteger(startFrame) || startFrame < 0
+      || !Number.isInteger(endFrameExclusive) || endFrameExclusive <= startFrame) {
+      throw new MockCommandError("INVALID_SOURCE_RANGE", `Mock: invalid source range at segment ${index + 1}.`);
+    }
+    if (endFrameExclusive > clip.frames) {
+      throw new MockCommandError(
+        "SOURCE_RANGE_OUT_OF_BOUNDS",
+        `Mock: segment ${index + 1} ends at frame ${endFrameExclusive}, beyond ${clip.frames} available frames.`
+      );
+    }
+    const trackIndex = segment.trackIndex === undefined ? 1 : Number(segment.trackIndex);
+    if (!Number.isInteger(trackIndex) || trackIndex < 1 || trackIndex > 100) {
+      throw new MockCommandError("INVALID_TRACK_INDEX", `Mock: invalid track index at segment ${index + 1}.`);
+    }
+    let recordFrame: number | null = null;
+    if (segment.recordFrame !== undefined) {
+      recordFrame = Number(segment.recordFrame);
+      if (!Number.isInteger(recordFrame) || recordFrame < 0) {
+        throw new MockCommandError("INVALID_TIMELINE_POSITION", `Mock: invalid record frame at segment ${index + 1}.`);
+      }
+    }
+    return { clip, startFrame, endFrameExclusive, trackIndex, recordFrame, includeAudio: segment.includeAudio === true };
+  });
+}
+
+function insertMockRanges(
+  timeline: MockTimeline,
+  segments: MockRangeSegment[]
+): { items: MockTimelineItem[]; expectedDurationFrames: number } {
+  const items: MockTimelineItem[] = [];
+  let expectedDurationFrames = 0;
+  let cursor = timeline.items.reduce((max, item) => Math.max(max, item.finish), 0);
+  for (const segment of segments) {
+    const duration = segment.endFrameExclusive - segment.startFrame;
+    const start = segment.recordFrame ?? cursor;
+    const item = buildMockItem(segment.clip, start, duration, segment.trackIndex, segment.startFrame);
+    timeline.items.push(item);
+    items.push({ ...item });
+    if (segment.includeAudio) {
+      // Linked placement: Resolve mirrors the range onto A1 when audio is
+      // requested, so the mock records a second item with the same timing.
+      const audioItem = buildMockItem(segment.clip, start, duration, 1, segment.startFrame, "audio");
+      timeline.items.push(audioItem);
+      items.push({ ...audioItem });
+    }
+    expectedDurationFrames += duration;
+    cursor = Math.max(cursor, start + duration);
+  }
+  return { items, expectedDurationFrames };
+}
+
 function mockTimelineSummary(timeline: MockTimeline): Record<string, unknown> {
   const endFrame = timeline.items.reduce((max, item) => Math.max(max, item.finish), 0);
+  // Live Resolve requires tracks to exist before placement; the mock reports the
+  // highest occupied track like AddTrack-then-append does in Resolve.
+  const videoTracks = timeline.items
+    .filter((item) => item.trackType === "video")
+    .reduce((max, item) => Math.max(max, item.trackIndex), 1);
+  const audioTracks = timeline.items
+    .filter((item) => item.trackType === "audio")
+    .reduce((max, item) => Math.max(max, item.trackIndex), 1);
   return {
     name: timeline.name,
     uniqueId: timeline.uniqueId,
     startFrame: 0,
     endFrame,
     startTimecode: "01:00:00:00",
-    videoTracks: 1,
-    audioTracks: 1,
+    videoTracks,
+    audioTracks,
     subtitleTracks: 0,
     settings: {}
   };
@@ -539,15 +681,7 @@ function handleMockCommand(
         let start = 0;
         for (const clip of clips) {
           const duration = clip.frames > 0 ? clip.frames : 240;
-          const item: MockTimelineItem = {
-            name: clip.name,
-            start,
-            finish: start + duration,
-            duration,
-            trackType: "video",
-            trackIndex: 1,
-            properties: { mediaId: String(clip.mediaId) }
-          };
+          const item = buildMockItem(clip, start, duration, 1, 0);
           items.push(item);
           start = item.finish;
         }
@@ -570,6 +704,54 @@ function handleMockCommand(
           uniqueId: item.uniqueId
         })),
         created: true
+      };
+    }
+
+    case "timeline.createFromRanges": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const rawName = typeof payloadRecord.name === "string" ? payloadRecord.name.trim() : "";
+      const hasName = payloadRecord.name !== undefined;
+      const name = hasName ? rawName : null;
+      if (name !== null && (name === "" || name.length > 120 || /[<>:"/\\|?*]/.test(name))) {
+        throw new MockCommandError("INVALID_TIMELINE_NAME", "Mock: invalid timeline name.");
+      }
+      const segments = parseMockRangeSegments(payloadRecord, state);
+      const timelineName = name ?? "Timeline";
+      const timeline: MockTimeline = {
+        name: timelineName,
+        uniqueId: createMockId("tl", timelineName),
+        items: []
+      };
+      state.timelines.push(timeline);
+      state.currentTimelineName = timeline.name;
+      const inserted = insertMockRanges(timeline, segments);
+      return {
+        ...base(),
+        timeline: mockTimelineSummary(timeline),
+        timelineName: timeline.name,
+        timelines: state.timelines.map((item, index) => ({
+          index: index + 1,
+          name: item.name,
+          uniqueId: item.uniqueId
+        })),
+        created: true,
+        appended: { count: inserted.items.length, items: inserted.items, timelineName: timeline.name },
+        segments: inserted.items.map((item, index) => ({
+          index: index + 1,
+          mediaId: item.mediaUniqueId,
+          startFrame: item.sourceStartFrame,
+          endFrameExclusive: item.sourceEndFrame,
+          endFrameSent: item.sourceEndFrame,
+          trackIndex: item.trackIndex,
+          recordFrame: item.start,
+          expectedDurationFrames: item.duration,
+          actualDurationFrames: item.duration
+        })),
+        expectedDurationFrames: inserted.expectedDurationFrames,
+        actualDurationFrames: inserted.expectedDurationFrames,
+        partial: false
       };
     }
 
@@ -608,15 +790,7 @@ function handleMockCommand(
       let start = lastFinish;
       for (const clip of clips) {
         const duration = clip.frames > 0 ? clip.frames : 240;
-        const item: MockTimelineItem = {
-          name: clip.name,
-          start,
-          finish: start + duration,
-          duration,
-          trackType: "video",
-          trackIndex: 1,
-          properties: { mediaId: String(clip.mediaId) }
-        };
+        const item = buildMockItem(clip, start, duration, 1, 0);
         timeline.items.push(item);
         appendedItems.push({ ...item });
         start = item.finish;
@@ -628,6 +802,36 @@ function handleMockCommand(
           items: appendedItems,
           timelineName: timeline.name
         }
+      };
+    }
+
+    case "timeline.appendRanges": {
+      if (state.currentProject === null) {
+        throw new MockCommandError("PROJECT_UNAVAILABLE", "Mock: no project is open.");
+      }
+      const timeline = mockCurrentTimeline(state);
+      if (!timeline) {
+        throw new MockCommandError("TIMELINE_UNAVAILABLE", "Mock: no current timeline is open.");
+      }
+      const segments = parseMockRangeSegments(payloadRecord, state);
+      const inserted = insertMockRanges(timeline, segments);
+      return {
+        ...base(),
+        appended: { count: inserted.items.length, items: inserted.items, timelineName: timeline.name },
+        segments: inserted.items.map((item, index) => ({
+          index: index + 1,
+          mediaId: item.mediaUniqueId,
+          startFrame: item.sourceStartFrame,
+          endFrameExclusive: item.sourceEndFrame,
+          endFrameSent: item.sourceEndFrame,
+          trackIndex: item.trackIndex,
+          recordFrame: item.start,
+          expectedDurationFrames: item.duration,
+          actualDurationFrames: item.duration
+        })),
+        expectedDurationFrames: inserted.expectedDurationFrames,
+        actualDurationFrames: inserted.expectedDurationFrames,
+        partial: false
       };
     }
 
@@ -768,10 +972,11 @@ export class MockResolveAdapter {
       version: options.version ?? "21.1.0.17-mock",
       isStudio: options.isStudio ?? false,
       projectName: options.projectName ?? "Mock Project",
-      timelineName: options.timelineName ?? "Mock Timeline"
+      timelineName: options.timelineName ?? "Mock Timeline",
+      seedClips: options.seedClips ?? []
     };
     this.requestPath = path.join(settings.requestsDir, REQUEST_FILE_NAME);
-    this.state = createMockState(this.options.projectName, this.options.timelineName);
+    this.state = createMockState(this.options.projectName, this.options.timelineName, this.options.seedClips);
   }
 
   async start(): Promise<void> {

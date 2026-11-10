@@ -36,7 +36,9 @@ export const MANAGEMENT_COMMANDS = [
 
 export const TIMELINE_EDITING_COMMANDS = [
   "timeline.create",
+  "timeline.createFromRanges",
   "timeline.appendClips",
+  "timeline.appendRanges",
   "timeline.deleteClips",
   "timeline.setItemProperty"
 ] as const;
@@ -114,6 +116,22 @@ const itemPropertySchema = z.union([
   z.number(),
   z.boolean()
 ]);
+
+const frameNumberSchema = z.number().int().min(0).max(2_000_000_000);
+
+const rangeSegmentSchema = z.object({
+  mediaId: mediaIdSchema,
+  startFrame: frameNumberSchema,
+  /** Exclusive source end frame, passed to Resolve as clipInfo.endFrame unchanged. */
+  endFrameExclusive: z.number().int().min(1).max(2_000_000_000),
+  trackIndex: z.number().int().min(1).max(100).optional(),
+  recordFrame: frameNumberSchema.optional(),
+  /** Place linked source audio on A1 alongside the video range. */
+  includeAudio: z.boolean().optional()
+}).strict().refine(
+  (segment) => segment.endFrameExclusive > segment.startFrame,
+  "endFrameExclusive must be greater than startFrame."
+);
 
 export const BridgeRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -307,8 +325,15 @@ export const COMMAND_PAYLOAD_SCHEMAS = {
     name: nameSchema.optional(),
     mediaIds: z.array(mediaIdSchema).max(100).optional()
   }).strict(),
+  "timeline.createFromRanges": z.object({
+    name: nameSchema.optional(),
+    segments: z.array(rangeSegmentSchema).min(1).max(1000)
+  }).strict(),
   "timeline.appendClips": z.object({
     mediaIds: z.array(mediaIdSchema).min(1).max(100)
+  }).strict(),
+  "timeline.appendRanges": z.object({
+    segments: z.array(rangeSegmentSchema).min(1).max(1000)
   }).strict(),
   "timeline.deleteClips": z.object({
     targets: z.array(deleteTargetSchema).min(1).max(50)

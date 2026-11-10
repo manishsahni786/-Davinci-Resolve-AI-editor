@@ -54,6 +54,6 @@ Run `npm run typecheck` and `npm test` after TypeScript changes. Run `npm run lu
 
 ## Known limits
 
-- Whole-clip timeline editing only; no trimming, transitions, audio mixing, or render/export yet.
+- Whole-clip timeline editing and `timeline.createFromRanges` are live-verified on Resolve Free 21.1.0.17 for single-track, two-video-track, multi-source and linked-A1-audio sequences. `timeline.appendRanges` is implemented/tested but not yet live-verified. No transitions, effects, captions, audio mixing/gain, or render/export yet.
 - `timeline.setItemProperty` uses `TimelineItem.SetClipColor` / `SetName` / `SetProperties`; there is no `SetProperty`.
 - Media analysis packages (FFmpeg/OpenCV/Whisper) are not installed.

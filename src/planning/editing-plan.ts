@@ -113,7 +113,6 @@ export const EditingPlanSchema = z.object({
   }
 
   const clips = new Map<string, z.infer<typeof PlannedClipSchema>>();
-  let previousTimelineStart = -1;
   let actualDuration = 0;
   for (const [index, clip] of plan.clips.entries()) {
     if (clips.has(clip.clipId)) {
@@ -123,10 +122,6 @@ export const EditingPlanSchema = z.object({
     if (clip.sourceEndSeconds <= clip.sourceStartSeconds) {
       context.addIssue({ code: "custom", path: ["clips", index, "sourceEndSeconds"], message: "Source end must be after source start." });
     }
-    if (clip.timelineStartSeconds < previousTimelineStart) {
-      context.addIssue({ code: "custom", path: ["clips", index, "timelineStartSeconds"], message: "Clips must be listed in timeline order." });
-    }
-    previousTimelineStart = clip.timelineStartSeconds;
     const source = sources.get(clip.sourceMediaId);
     if (!source) {
       context.addIssue({ code: "custom", path: ["clips", index, "sourceMediaId"], message: `Unknown source media id: ${clip.sourceMediaId}` });
@@ -140,6 +135,49 @@ export const EditingPlanSchema = z.object({
     }
     actualDuration = Math.max(actualDuration, clip.timelineStartSeconds + clip.sourceEndSeconds - clip.sourceStartSeconds);
   }
+
+  // Per-video-track contiguity: no unintended gaps or overlaps on a track.
+  const clipsByTrack = new Map<number, Array<{ index: number; clip: z.infer<typeof PlannedClipSchema> }>>();
+  for (const [index, clip] of plan.clips.entries()) {
+    const entries = clipsByTrack.get(clip.videoTrack) ?? [];
+    entries.push({ index, clip });
+    clipsByTrack.set(clip.videoTrack, entries);
+  }
+  let earliestTimelineStart = Number.POSITIVE_INFINITY;
+  for (const [track, entries] of clipsByTrack) {
+    let expectedStart: number | null = null;
+    let previousStart = -1;
+    for (const { index, clip } of entries) {
+      earliestTimelineStart = Math.min(earliestTimelineStart, clip.timelineStartSeconds);
+      if (clip.timelineStartSeconds < previousStart) {
+        context.addIssue({
+          code: "custom",
+          path: ["clips", index, "timelineStartSeconds"],
+          message: `Clips on video track ${track} must be listed in timeline order.`
+        });
+      }
+      previousStart = clip.timelineStartSeconds;
+      if (expectedStart !== null) {
+        const gap = clip.timelineStartSeconds - expectedStart;
+        if (Math.abs(gap) > 0.05) {
+          context.addIssue({
+            code: "custom",
+            path: ["clips", index, "timelineStartSeconds"],
+            message: `Video track ${track} has a gap or overlap of ${gap.toFixed(3)}s before clip ${clip.clipId}.`
+          });
+        }
+      }
+      expectedStart = clip.timelineStartSeconds + (clip.sourceEndSeconds - clip.sourceStartSeconds);
+    }
+  }
+  if (Number.isFinite(earliestTimelineStart) && earliestTimelineStart > 0.05) {
+    context.addIssue({
+      code: "custom",
+      path: ["clips"],
+      message: `The timeline must start at 0s (earliest clip starts at ${earliestTimelineStart.toFixed(3)}s).`
+    });
+  }
+
   if (Math.abs(actualDuration - plan.plannedDurationSeconds) > 0.05) {
     context.addIssue({ code: "custom", path: ["plannedDurationSeconds"], message: `Planned duration must match the last clip end (${actualDuration.toFixed(3)}s).` });
   }

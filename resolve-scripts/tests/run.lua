@@ -59,7 +59,8 @@ local clip = {
       ["Duration"] = "00:00:10:00",
       ["Frames"] = "240",
       ["Resolution"] = "1920x1080",
-      ["FPS"] = "24"
+      ["FPS"] = "24",
+      ["Audio Ch"] = "2"
     }
     return properties[key]
   end
@@ -243,6 +244,7 @@ resolve = {
   GetVersionString = function() return "21.1.0.17" end,
   IsStudio = function() return false end,
   GetCurrentPage = function() return "media" end,
+  OpenPage = function(_, page) return page ~= nil end,
   GetProjectManager = function() return managedManager end
 }
 context.setResolve(resolve)
@@ -287,19 +289,42 @@ local function makeManagedTimeline(name, uniqueId)
   local timelineObject = {
     name = name,
     uniqueId = uniqueId or ("timeline-" .. name),
+    videoTrackCount = 1,
     GetName = function(self) return self.name end,
     GetUniqueId = function(self) return self.uniqueId end,
     GetStartFrame = function() return 0 end,
     GetEndFrame = function() return 239 end,
     GetStartTimecode = function() return "01:00:00:00" end,
-    GetTrackCount = function(_, kind) return kind == "subtitle" and 0 or 1 end,
+    AddTrack = function(self, kind)
+      if kind == "video" then
+        self.videoTrackCount = (self.videoTrackCount or 1) + 1
+        return true
+      end
+      return false
+    end,
+    GetTrackCount = function(self, kind)
+      if kind == "subtitle" then
+        return 0
+      end
+      if kind == "video" then
+        local count = self.videoTrackCount or 1
+        for _, item in ipairs(timelineItems) do
+          count = math.max(count, item.GetTrackIndex())
+        end
+        return count
+      end
+      return 1
+    end,
     GetSettings = function() return { timelineFrameRate = "24" } end,
     GetMarkers = function() return { __flags = 4194304 } end,
     GetItemListInTrack = function(_, kind, index)
-      if kind == "video" and index == 1 then
-        return timelineItems
+      local filtered = { __flags = 4194304 }
+      for _, item in ipairs(timelineItems) do
+        if (kind == nil or item.GetTrackType() == kind) and item.GetTrackIndex() == index then
+          filtered[#filtered + 1] = item
+        end
       end
-      return { __flags = 4194304 }
+      return filtered
     end,
     DeleteClips = function(_, items)
       local remaining = { __flags = 4194304 }
@@ -319,15 +344,22 @@ local function makeManagedTimeline(name, uniqueId)
   return timelineObject
 end
 
-local function makeTimelineItem(name, startFrame, finishFrame)
+local function makeTimelineItem(name, startFrame, finishFrame, sourceStartFrame, sourceEndFrame, trackIndex, mediaItem, trackType)
   local properties = {}
+  local track = trackIndex or 1
+  local sourceStart = sourceStartFrame or 0
+  local sourceEnd = sourceEndFrame or (finishFrame - startFrame - 1)
+  local kind = trackType or "video"
   return {
     GetName = function() return name end,
     GetStart = function() return startFrame end,
     GetEnd = function() return finishFrame end,
     GetDuration = function() return finishFrame - startFrame end,
-    GetTrackType = function() return "video" end,
-    GetTrackIndex = function() return 1 end,
+    GetSourceStartFrame = function() return sourceStart end,
+    GetSourceEndFrame = function() return sourceEnd end,
+    GetMediaPoolItem = function() return mediaItem end,
+    GetTrackType = function() return kind end,
+    GetTrackIndex = function() return track end,
     SetProperties = function(_, values)
       for key, value in pairs(values) do
         properties[key] = value
@@ -350,6 +382,7 @@ end
 
 managedPool.CreateEmptyTimeline = function(_, name)
   local created = makeManagedTimeline(name)
+  timelineItems = { __flags = 4194304 }
   managedTimelines[#managedTimelines + 1] = created
   managedCurrentProject._currentTimeline = created
   return created
@@ -370,15 +403,59 @@ managedPool.CreateTimelineFromClips = function(_, name, items)
 end
 managedPool.AppendToTimeline = function(_, items)
   local appended = { __flags = 4194304 }
-  local start = 0
-  if #timelineItems > 0 then
-    start = timelineItems[#timelineItems].GetEnd()
-  end
-  for _, mediaItem in ipairs(items) do
-    local item = makeTimelineItem(mediaItem.GetName(), start, start + 240)
+  for _, entry in ipairs(items) do
+    local mediaItem = entry
+    local clipInfo = nil
+    if entry.mediaPoolItem ~= nil then
+      mediaItem = entry.mediaPoolItem
+      clipInfo = entry
+    end
+    local trackIndex = clipInfo and clipInfo.trackIndex or 1
+    local sourceStart = clipInfo and clipInfo.startFrame or 0
+    local duration = 240
+    if clipInfo and clipInfo.endFrame ~= nil then
+      -- Live Resolve Free 21.1 behaviour: AppendToTimeline endFrame is exclusive,
+      -- so duration is endFrame - startFrame (verified: 1200..1799 -> 599 frames).
+      duration = clipInfo.endFrame - sourceStart
+    end
+    local start
+    if clipInfo and clipInfo.recordFrame ~= nil then
+      start = clipInfo.recordFrame
+    else
+      start = 0
+      for _, existing in ipairs(timelineItems) do
+        if existing.GetTrackIndex() == trackIndex then
+          start = math.max(start, existing.GetEnd())
+        end
+      end
+    end
+    local item = makeTimelineItem(
+      mediaItem.GetName(),
+      start,
+      start + duration,
+      sourceStart,
+      sourceStart + duration,
+      trackIndex,
+      mediaItem
+    )
     timelineItems[#timelineItems + 1] = item
     appended[#appended + 1] = item
-    start = start + 240
+    -- Omitting mediaType means video + linked audio in Resolve, so the mock
+    -- records the mirrored A1 item too.
+    if clipInfo ~= nil and clipInfo.mediaType == nil then
+      local audioItem = makeTimelineItem(
+        mediaItem.GetName(),
+        start,
+        start + duration,
+        sourceStart,
+        sourceStart + duration,
+        1,
+        mediaItem,
+        "audio"
+      )
+      timelineItems[#timelineItems + 1] = audioItem
+      appended[#appended + 1] = audioItem
+    end
   end
   return appended
 end
@@ -408,6 +485,114 @@ check(missingClipTimeline ~= nil and missingClipFailure.code == "TIMELINE_CLIP_N
 local appendedClips, appendFailure = context.appendClips({ mediaIds = { "media-id-1" } })
 check(appendFailure == nil and appendedClips.appended.count == 1, "append clips to timeline")
 check(#timelineItems == 2, "timeline has two items after append")
+
+local rangeTimeline, rangeFailure = context.createTimelineFromRanges({
+  name = "Range Reel",
+  segments = {
+    { mediaId = "clip-id-1", startFrame = 10, endFrameExclusive = 34, trackIndex = 1, recordFrame = 0 },
+    { mediaId = "media-id-1", startFrame = 5, endFrameExclusive = 25, trackIndex = 2, recordFrame = 24 }
+  }
+})
+check(rangeFailure == nil and rangeTimeline.timeline.name == "Range Reel", "create timeline from source ranges")
+check(rangeTimeline.expectedDurationFrames == 44, "range timeline expected duration")
+check(rangeTimeline.actualDurationFrames == 44, "range timeline actual duration")
+check(rangeTimeline.segments[1].endFrameSent == 34, "range end passed through as exclusive frame")
+check(rangeTimeline.segments[2].trackIndex == 2, "range track index preserved")
+check(rangeTimeline.tracksAdded == 1, "range timeline added one video track")
+check(rangeTimeline.videoTracks == 2, "range timeline reports two video tracks")
+check(#timelineItems == 2, "range timeline has two items")
+check(timelineItems[1].GetSourceStartFrame() == 10 and timelineItems[1].GetSourceEndFrame() == 34, "range one source frames")
+check(timelineItems[1].GetDuration() == 24, "range one duration")
+check(timelineItems[2].GetTrackIndex() == 2 and timelineItems[2].GetStart() == 24, "range two track and record frame")
+check(rangeTimeline.audioItems == 0 and rangeTimeline.expectedAudioItems == 0, "ranges stay video-only unless audio is requested")
+
+local audioTimeline, audioFailure = context.createTimelineFromRanges({
+  name = "Audio Range Reel",
+  segments = {
+    { mediaId = "clip-id-1", startFrame = 10, endFrameExclusive = 34, trackIndex = 1, recordFrame = 0, includeAudio = true },
+    { mediaId = "media-id-1", startFrame = 5, endFrameExclusive = 25, trackIndex = 1, recordFrame = 24, includeAudio = true }
+  }
+})
+check(audioFailure == nil and audioTimeline.timeline.name == "Audio Range Reel", "create range timeline with linked audio")
+check(audioTimeline.expectedAudioItems == 2 and audioTimeline.audioItems == 2, "two linked audio items placed on A1")
+check(audioTimeline.audioTracks == 1 and audioTimeline.segments[1].includeAudio == true, "audio track and segment audio flag reported")
+local audioTrackItems = managedTimelines[#managedTimelines]:GetItemListInTrack("audio", 1)
+check(#audioTrackItems == 2, "A1 holds both audio items")
+check(audioTrackItems[1].GetStart() == 0 and audioTrackItems[2].GetStart() == 24, "audio items mirror video record frames")
+check(audioTrackItems[1].GetSourceStartFrame() == 10 and audioTrackItems[1].GetSourceEndFrame() == 34, "audio item keeps the source range")
+
+local baseAppendToTimeline = managedPool.AppendToTimeline
+managedPool.AppendToTimeline = function(self, items)
+  local entry = items[1]
+  if entry ~= nil and entry.mediaType == nil then
+    items = {
+      {
+        mediaPoolItem = entry.mediaPoolItem,
+        startFrame = entry.startFrame,
+        endFrame = entry.endFrame,
+        trackIndex = entry.trackIndex,
+        recordFrame = entry.recordFrame,
+        mediaType = 1
+      }
+    }
+  end
+  return baseAppendToTimeline(self, items)
+end
+local droppedAudio, droppedAudioFailure = context.createTimelineFromRanges({
+  name = "Dropped Audio",
+  segments = {
+    { mediaId = "clip-id-1", startFrame = 0, endFrameExclusive = 10, trackIndex = 1, recordFrame = 0, includeAudio = true }
+  }
+})
+check(droppedAudioFailure ~= nil and droppedAudioFailure.code == "AUDIO_APPEND_FAILED", "silently dropped linked audio fails closed")
+check(droppedAudio.partial == true and droppedAudio.audioItems == 0, "dropped audio reports partial state")
+managedPool.AppendToTimeline = baseAppendToTimeline
+
+local stuckTimeline = makeManagedTimeline("Stuck Tracks")
+stuckTimeline.AddTrack = function() return true end
+stuckTimeline.GetTrackCount = function(_, kind)
+  if kind == "subtitle" then return 0 end
+  return 1
+end
+managedPool.CreateEmptyTimeline = function(_, name)
+  timelineItems = { __flags = 4194304 }
+  managedTimelines[#managedTimelines + 1] = stuckTimeline
+  managedCurrentProject._currentTimeline = stuckTimeline
+  stuckTimeline.name = name
+  return stuckTimeline
+end
+local stuckRanges, stuckFailure = context.createTimelineFromRanges({
+  name = "Stuck Tracks",
+  segments = {
+    { mediaId = "clip-id-1", startFrame = 0, endFrameExclusive = 10, trackIndex = 2, recordFrame = 0 }
+  }
+})
+check(stuckFailure ~= nil and stuckFailure.code == "TRACK_CREATE_FAILED", "soft AddTrack without track growth fails closed")
+check(stuckRanges.created == true, "stuck track timeline still created before failure")
+
+managedPool.CreateEmptyTimeline = function(_, name)
+  local created = makeManagedTimeline(name)
+  timelineItems = { __flags = 4194304 }
+  managedTimelines[#managedTimelines + 1] = created
+  managedCurrentProject._currentTimeline = created
+  return created
+end
+
+local badRange, badRangeFailure = context.appendRanges({
+  segments = { { mediaId = "clip-id-1", startFrame = 10, endFrameExclusive = 10 } }
+})
+check(badRangeFailure ~= nil and badRangeFailure.code == "INVALID_SOURCE_RANGE", "inverted source range rejected")
+
+local missingRange, missingRangeFailure = context.appendRanges({
+  segments = { { mediaId = "no-such-clip", startFrame = 0, endFrameExclusive = 10 } }
+})
+check(missingRangeFailure ~= nil and missingRangeFailure.code == "TIMELINE_CLIP_NOT_FOUND", "missing range clip rejected")
+
+local propertyTimeline, propertyTimelineFailure = context.createTimeline({
+  name = "Property Reel",
+  mediaIds = { "clip-id-1", "media-id-1" }
+})
+check(propertyTimelineFailure == nil and #timelineItems == 2, "reset timeline for property tests")
 
 local setPropertyResult, setPropertyFailure = context.setItemProperty({
   target = { trackType = "video", trackIndex = 1, itemIndex = 1 },

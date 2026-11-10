@@ -38,6 +38,10 @@ Usage:
                                  Create a timeline, optionally from media ids.
   npm run resolve:timeline-append -- <mediaId> [<mediaId>...]
                                  Append media ids to the current timeline.
+  npm run resolve:timeline-create-ranges -- "<name>" --segments='[{"mediaId":"id","startFrame":0,"endFrameExclusive":450,"trackIndex":1,"recordFrame":0}]'
+                                 Create a timeline from frame-accurate source ranges (endFrame is exclusive).
+  npm run resolve:timeline-append-ranges -- --segments='[{"mediaId":"id","startFrame":0,"endFrameExclusive":450}]'
+                                 Append frame-accurate source ranges to the current timeline.
   npm run resolve:timeline-delete -- <trackType> <trackIndex> <itemIndex>...
                                  Delete timeline items.
   npm run resolve:timeline-set-property -- <trackType> <trackIndex> <itemIndex> --key=<key> [--value=<value>]
@@ -67,7 +71,7 @@ Management commands:
   project.create, project.open, project.save, media.createBin, media.import
 
 Timeline editing commands:
-  timeline.create, timeline.appendClips, timeline.deleteClips, timeline.setItemProperty
+  timeline.create, timeline.createFromRanges, timeline.appendClips, timeline.appendRanges, timeline.deleteClips, timeline.setItemProperty
 
 Options:
   --timeout-ms=<number>          Override the bridge wait timeout.
@@ -101,6 +105,19 @@ function optionValue(args: string[], name: string): string | undefined {
 
 function positionalArgs(args: string[]): string[] {
   return args.slice(1).filter((arg) => !arg.startsWith("--"));
+}
+
+function segmentsOption(args: string[]): unknown[] | null {
+  const raw = optionValue(args, "segments");
+  if (raw === undefined || raw.trim() === "") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main(): Promise<number> {
@@ -164,7 +181,7 @@ async function main(): Promise<number> {
       const requestedCommand = args.slice(1).find((arg) => !arg.startsWith("--")) ?? "diagnostics.ping";
       if (!isKnownBridgeCommand(requestedCommand)) {
         console.error(`Unknown bridge command: ${requestedCommand}`);
-        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect, project.create, project.open, project.save, media.createBin, media.import, timeline.create, timeline.appendClips, timeline.deleteClips, timeline.setItemProperty");
+        console.error("Known commands: diagnostics.ping, diagnostics.snapshot, bridge.health, bridge.echo, project.inspect, media.inspect, timeline.inspect, render.inspect, project.create, project.open, project.save, media.createBin, media.import, timeline.create, timeline.createFromRanges, timeline.appendClips, timeline.appendRanges, timeline.deleteClips, timeline.setItemProperty");
         return 1;
       }
       const request = createRequest(requestedCommand, {
@@ -272,6 +289,23 @@ async function main(): Promise<number> {
         return 1;
       }
       return await runManagementCommand("timeline.appendClips", { mediaIds });
+    }
+    case "timeline-create-ranges": {
+      const name = positionalArgs(args)[0];
+      const segments = segmentsOption(args);
+      if (!name || segments === null) {
+        console.error('Usage: npm run resolve:timeline-create-ranges -- "<name>" --segments=\'[{"mediaId":"id","startFrame":0,"endFrameExclusive":450,"trackIndex":1,"recordFrame":0}]\'');
+        return 1;
+      }
+      return await runManagementCommand("timeline.createFromRanges", { name, segments });
+    }
+    case "timeline-append-ranges": {
+      const segments = segmentsOption(args);
+      if (segments === null) {
+        console.error('Usage: npm run resolve:timeline-append-ranges -- --segments=\'[{"mediaId":"id","startFrame":0,"endFrameExclusive":450}]\'');
+        return 1;
+      }
+      return await runManagementCommand("timeline.appendRanges", { segments });
     }
     case "timeline-delete": {
       const positionals = positionalArgs(args);

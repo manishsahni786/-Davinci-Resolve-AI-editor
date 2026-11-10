@@ -114,7 +114,16 @@ const CAPABILITIES: Capability[] = [
     implemented: true,
     milestone: "5",
     evidence: "All four commands verified live in Resolve Free 21.1.0.17 on 2026-11-03 with automatic menu triggering: timeline.create, timeline.appendClips (1 item), timeline.setItemProperty (Clip Color = Blue, applied: true) and timeline.deleteClips (1 item removed) each returned ok: true.",
-    notes: "timeline.setItemProperty maps Clip Color/Clip Name to SetClipColor/SetName and batches other keys through TimelineItem.SetProperties; TimelineItem has no SetProperty method. Whole-clip create/append/delete/set-property only. Trimmed in/out append (startFrame/endFrame clipInfo) and transitions are not yet exposed."
+    notes: "timeline.setItemProperty maps Clip Color/Clip Name to SetClipColor/SetName and batches other keys through TimelineItem.SetProperties; TimelineItem has no SetProperty method. Whole-clip create/append/delete/set-property are verified. The approved-plan executor additionally uses timeline.createFromRanges for frame-accurate in/out points; that path is live-verified for single-track, two-video-track, multi-source and linked-audio sequences."
+  },
+  {
+    id: "resolve.source-range-editing",
+    name: "Frame-accurate source in/out placement on a new timeline",
+    status: "verified",
+    implemented: true,
+    milestone: "8",
+    evidence: "Live Resolve Free 21.1.0.17 runs on 2026-11-09/10: timeline.createFromRanges created 'AIVE Range Live Test 2' with three segments (1200->1800, 7200->8100, 18000->18300 at start 0/600/1500, 1800 frames), 'AIVE Range Multi-Track Test 2' with V1 plus a V2 range (12000->12300, tracksAdded 1, videoTracks 2), 'AIVE Multi-Source Test' interleaving two distinct media files across V1 and V2, and 'AIVE Audio Range Test' where four trimmed V1 ranges from two files also produced four linked A1 audio items with identical source in/out frames; timeline.inspect confirmed every item and source frame. An earlier run proved AppendToTimeline endFrame is exclusive (start 1200 / end 1799 gave 599 frames).",
+    notes: "Single-track, two-video-track and multi-source placement are live-verified, and video-track-1 ranges can carry linked source audio on A1 (includeAudio) which is verified live. timeline.appendRanges is still not live-verified, and only 60 fps sources have been exercised. Multi-track insertion needs Resolve to already have the target track, so the bridge calls Timeline.AddTrack and fails closed with TRACK_CREATE_FAILED if GetTrackCount does not grow. The earlier inclusive-endFrame assumption came from the shipped 7_add_subclips_to_timeline.py example, which uses AddSubClip rather than AppendToTimeline, and was disproved by a live run. Range segments default to mediaType 1 (video only); with includeAudio the bridge omits mediaType so Resolve places linked audio, and it fails closed with AUDIO_APPEND_FAILED when A1 ends up short. Timeline.GetEndFrame() can report the start-timecode frame (216000) on this build, so verification relies on item-level timing. Transitions, effects, captions, audio mixing/gain, aspect-ratio enforcement and rendering remain unimplemented."
   },
   {
     id: "resolve.editing-workflow",
