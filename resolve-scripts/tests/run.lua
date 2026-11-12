@@ -571,6 +571,26 @@ check(stuckFailure ~= nil and stuckFailure.code == "TRACK_CREATE_FAILED", "soft 
 check(stuckRanges.created == true, "stuck track timeline still created before failure")
 
 managedPool.CreateEmptyTimeline = function(_, name)
+  local offsetTimeline = makeManagedTimeline(name)
+  offsetTimeline.GetStartFrame = function() return 216000 end
+  timelineItems = { __flags = 4194304 }
+  managedTimelines[#managedTimelines + 1] = offsetTimeline
+  managedCurrentProject._currentTimeline = offsetTimeline
+  return offsetTimeline
+end
+local offsetRanges, offsetFailure = context.createTimelineFromRanges({
+  name = "Offset Timeline",
+  segments = {
+    { mediaId = "clip-id-1", startFrame = 10, endFrameExclusive = 34, trackIndex = 1, recordFrame = 0 },
+    { mediaId = "media-id-1", startFrame = 5, endFrameExclusive = 25, trackIndex = 1, recordFrame = 24 }
+  }
+})
+check(offsetFailure == nil, "offset timeline accepts ranges")
+check(offsetRanges.timelineStartFrame == 216000, "timeline start frame reported")
+check(timelineItems[1].GetStart() == 216000, "record frame offset by timeline start")
+check(timelineItems[2].GetStart() == 216024, "second record frame offset by timeline start")
+
+managedPool.CreateEmptyTimeline = function(_, name)
   local created = makeManagedTimeline(name)
   timelineItems = { __flags = 4194304 }
   managedTimelines[#managedTimelines + 1] = created

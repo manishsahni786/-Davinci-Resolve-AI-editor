@@ -1684,6 +1684,13 @@ local function appendRangeSegments(session, mediaPool, timeline, segments)
     }
   end
 
+  -- Resolve numbers timeline frames from the timeline start timecode, so a
+  -- plan's relative recordFrame has to be offset before it is handed to
+  -- AppendToTimeline. Without this the items land before the timeline range
+  -- (e.g. frame 0 while the timeline starts at 216000) and Resolve reports a
+  -- zero-length timeline even though the items exist.
+  local timelineStart = rangeFrameValue(optionalCall(session, timeline, "GetStartFrame")) or 0
+
   local appendedSummaries = emptyArray()
   local segmentReports = emptyArray()
   local expectedTotal = 0
@@ -1745,7 +1752,7 @@ local function appendRangeSegments(session, mediaPool, timeline, segments)
       clipInfo.trackIndex = segment.trackIndex
     end
     if segment.recordFrame ~= nil then
-      clipInfo.recordFrame = segment.recordFrame
+      clipInfo.recordFrame = timelineStart + segment.recordFrame
     end
 
     local appended = recordCall(session, mediaPool, "AppendToTimeline", { clipInfo })
@@ -1810,11 +1817,37 @@ local function appendRangeSegments(session, mediaPool, timeline, segments)
       endFrameSent = segment.endFrameExclusive,
       trackIndex = segment.trackIndex,
       recordFrame = segment.recordFrame,
+      recordFrameApplied = segment.recordFrame ~= nil and (timelineStart + segment.recordFrame) or nil,
       actualStart = actualStart,
       expectedDurationFrames = expectedDuration,
       actualDurationFrames = actualDuration,
       includeAudio = includeAudio
     }
+
+    if segment.recordFrame ~= nil and actualStart ~= nil
+      and math.abs(actualStart - (timelineStart + segment.recordFrame)) > 0.5 then
+      return {
+        appended = { count = #appendedSummaries, items = appendedSummaries, timelineName = recordCall(session, timeline, "GetName") },
+        segments = segmentReports,
+        expectedDurationFrames = expectedTotal + expectedDuration,
+        actualDurationFrames = actualTotalKnown and actualTotal or nil,
+        partial = true,
+        tracksAdded = tracksAdded,
+        videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
+        audioTracks = recordCall(session, timeline, "GetTrackCount", "audio")
+      }, {
+        code = "SEGMENT_POSITION_MISMATCH",
+        message = "Resolve placed the source range at a different timeline frame than requested at index "
+          .. tostring(index) .. ".",
+        details = {
+          failedIndex = index,
+          mediaId = segment.mediaId,
+          expectedStart = timelineStart + segment.recordFrame,
+          actualStart = actualStart,
+          timelineStartFrame = timelineStart
+        }
+      }
+    end
 
     if math.abs(actualDuration - expectedDuration) > 0.5 then
       return {
@@ -1853,6 +1886,7 @@ local function appendRangeSegments(session, mediaPool, timeline, segments)
     expectedDurationFrames = expectedTotal,
     actualDurationFrames = actualTotal,
     partial = false,
+    timelineStartFrame = timelineStart,
     tracksAdded = tracksAdded,
     videoTracks = recordCall(session, timeline, "GetTrackCount", "video"),
     audioTracks = recordCall(session, timeline, "GetTrackCount", "audio"),
@@ -1935,6 +1969,7 @@ function context.createTimelineFromRanges(options)
     result.audioTracksAdded = rangeResult.audioTracksAdded
     result.expectedAudioItems = rangeResult.expectedAudioItems
     result.audioItems = rangeResult.audioItems
+    result.timelineStartFrame = rangeResult.timelineStartFrame
   end
   -- Refresh after AddTrack / AppendToTimeline so callers see the true track count.
   result.timeline = timelineSummary(timeline, session)
@@ -1989,6 +2024,7 @@ function context.appendRanges(options)
     result.audioTracksAdded = rangeResult.audioTracksAdded
     result.expectedAudioItems = rangeResult.expectedAudioItems
     result.audioItems = rangeResult.audioItems
+    result.timelineStartFrame = rangeResult.timelineStartFrame
   end
   if rangeFailure ~= nil then
     result.failure = rangeFailure

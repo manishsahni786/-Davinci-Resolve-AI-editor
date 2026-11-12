@@ -40,3 +40,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Editor / agent-local config
+.cursor/
